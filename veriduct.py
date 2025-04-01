@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Veriduct: A Data Laundering Framework for Stealth File Encoding and Decoding
 

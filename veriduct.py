@@ -8,11 +8,6 @@ Dependencies:
   - cryptography
   - zstandard
 
-For dependency management, consider adding a requirements.txt:
-  cryptography>=3.0.0
-  zstandard>=0.15.2
-"""
-
 import os
 import sys
 import json

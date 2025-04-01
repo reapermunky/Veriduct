@@ -1,5 +1,5 @@
 Veriduct - 
-A Data Laundering Framework for Stealth File Encoding and Decoding
+A Data Framework for Stealth File Encoding and Decoding
 
 Disclaimer: This tool is provided for educational and research purposes only.
 It is intended for legal and ethical use. The author is not responsible for any misuse.

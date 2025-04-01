@@ -1,5 +1,5 @@
 """
-Veriduct: A Data Framework for File Encoding and Decoding
+Veriduct: A Python Framework for File Encoding and Decoding
 
 DISCLAIMER: This tool is provided for educational and research purposes only.
 It is intended for legal and ethical use. The author is not responsible for any misuse.

@@ -7,7 +7,7 @@ It is intended for legal and ethical use. The author is not responsible for any 
 Dependencies:
   - cryptography
   - zstandard
-
+"""
 import os
 import sys
 import json

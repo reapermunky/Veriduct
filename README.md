@@ -15,6 +15,8 @@ Encrypted with the Python cryptography library’s Fernet (symmetric encryption)
 
 By splitting and disguising file content, Veriduct offers a level of “stealth” that can complement more conventional approaches to data encryption or storage.
 
+Example use-case: A journalist under surveillance fragments files. The USB has only meaningless chunks. She crosses the border. She’s safe.
+
 Key Features: 
 
 Chunked Storage: Splits files into 4 KB chunks and stores them in a dedicated dictionary (veriduct_dict).

@@ -1,160 +1,92 @@
-Veriduct - 
-A Python Data Framework for File Encoding and Decoding
+Veriduct
 
-Disclaimer: This tool is provided for educational and research purposes only.
-It is intended for legal and ethical use. The author is not responsible for any misuse.
+Semantic Erasure as a Framework, Not a Feature
 
-Overview - 
-Veriduct is a command-line utility designed to chunk and store file data in a “dictionary” of SHA-256–labeled blobs, while generating a compact key file that describes how to reassemble the original files. The key can optionally be:
+Veriduct doesn’t hide your files. It dismantles them. Data stays visible—but becomes meaningless.
+This is privacy beyond encryption. This is the end of recoverable context.
 
-Disguised in formats like CSV, LOG, or CONF (for obfuscation).
+⸻
 
-Compressed using Zstandard.
+What Is Veriduct?
 
-Encrypted with the Python cryptography library’s Fernet (symmetric encryption).
+Veriduct is a modular, stealth-capable framework designed to erase the meaning of files without deleting or encrypting them. Traditional cybersecurity relies on patterns—signatures, metadata, extensions, behaviors. Veriduct sidesteps all of that by atomizing files into indistinguishable binary fragments and removing all context that links them together.
 
-By splitting and disguising file content, Veriduct offers a level of “stealth” that can complement more conventional approaches to data encryption or storage.
+There’s no encryption header. No ransomware note. No digital fingerprint. Just noise.
 
-Example use-case: A journalist under surveillance fragments files. The USB has only meaningless chunks. She crosses the border. She’s safe.
+You can’t crack what doesn’t mean anything.
 
-Key Features: 
+⸻
 
-Chunked Storage: Splits files into 4 KB chunks and stores them in a dedicated dictionary (veriduct_dict).
+Who Is This For?
 
-Unique Deduplication: Identical chunks (same SHA-256 hash) are stored only once.
+This tool is for people who operate in environments where being seen trying to protect data can be as dangerous as the data itself.
+	•	Journalists working in authoritarian regions
+	•	Whistleblowers needing plausible deniability
+	•	Activists dodging surveillance tools that flag encryption
+	•	Security researchers exploring nontraditional data resilience
+	•	Developers looking to integrate semantic erasure in privacy-first software
+	•	Anyone asking the question:
+“What if my files could disappear without disappearing?”
 
-Flexible Key Options: Store the key in a standard Zstandard-compressed JSON file, disguise it, or encrypt it.
+⸻
 
-Simple CLI: Includes encode and decode commands to simplify usage.
+How It Works (In Plain English)
 
-Logging & Error Handling: Robust logging for troubleshooting.
+You run Veriduct. It breaks your files into thousands of fragments.
+Each piece is renamed to look like nothing.
+The original file is destroyed.
+A small, hidden “map” file—the key—is the only way to put it back together.
+No key = no recovery. Even with the best forensic tools.
 
+The fragments look like junk. And they don’t match signatures, extensions, or even file types. They just exist.
 
-Installation: 
-Clone or Download this repository.
+⸻
 
-Ensure Python 3.6+ is installed.
+Modules
+	•	BlobDropper – Fragments files, stores meaningless pieces, deletes originals
+	•	KeyDisguiser – Stores the only way to reconstruct the data, disguises the map
+	•	Propagator – Spreads silently across devices via known lateral movement methods
+	•	TriggerSystem – Executes context erasure by time, signal, manual drop, or remote call
 
-Install required Python packages:
+Each module is clean, isolated, and optional. Customize it. Weaponize it. Or integrate it into something entirely new.
 
-nginx
-Copy
-Edit
-pip install -r requirements.txt
-Dependencies:
+⸻
 
-cryptography (for Fernet encryption)
+Example Use Case:
 
-zstandard (for fast compression/decompression)
+A journalist copies sensitive documents to a USB stick. Veriduct runs automatically. The files are atomized into anonymous 4KB fragments with no metadata or file type.
 
-(Optional) Make the script executable on Unix-like systems:
+At the border checkpoint, the USB is scanned.
+There’s no encryption. No locked folders. No suspicious software.
+Just random-looking files.
 
-bash
-Copy
-Edit
-chmod +x veriduct.py
-Usage
-Veriduct provides a CLI with two main commands: encode and decode.
+The map file? It’s already been exfiltrated.
+Without it, there’s nothing to find—and nothing to prove existed.
 
-Encode
-php-template
-Copy
-Edit
-./veriduct.py encode <file-or-directory> <out-directory> [--disguise <format>] [--encrypt]
-Arguments:
+⸻
 
-file-or-directory
-The path to a file or folder you want to encode.
+Ethics & Intent
 
-out-directory
-Where you want to store the output key (and disguised/encrypted key, if specified).
+Veriduct is not malware.
+It does not spread autonomously, does not encrypt for ransom, and does not exploit systems without user action.
 
-Options:
+It’s a framework—a tool that can be used responsibly, or misused like anything else.
 
---disguise <format>
-Disguise the key in one of the supported formats: csv, log, or conf.
+Our intent is to provide a protective mechanism for those who need to disappear data without flagging their intent to do so. In high-risk environments, plausible deniability isn’t a luxury. It’s survival.
 
---encrypt
-Encrypt the key using Fernet instead of leaving it in cleartext or disguised form.
+⸻
 
-Decode
-php-template
-Copy
-Edit
-./veriduct.py decode <key-path> <out-directory> [--disguise <format>] [--decrypt <key>]
-Arguments:
+Disclaimer
 
-key-path
-The path to the key file (disguised, encrypted, or raw) produced by encode.
+This project is provided as-is, for educational and ethical research purposes only.
+The author is not responsible for misuse, unlawful deployment, or harm resulting from third-party modification or weaponization.
 
-out-directory
-Where the reconstructed files should be placed.
+Don’t be a jackass. Use it for freedom, not chaos.
 
-Options:
+⸻
 
---disguise <format>
-Specifies the same format used to disguise the key file (csv, log, or conf) so that Veriduct can parse it.
+Status
 
---decrypt <key>
-The Fernet decryption key (Base64-encoded) if the key file was encrypted.
-
-Examples
-1. Basic Encoding
-bash
-Copy
-Edit
-./veriduct.py encode ~/Documents/my-project ~/output
-Splits my-project into chunks in veriduct_dict/.
-
-Produces a compressed key file (veriduct.key.zst) in ~/output.
-
-2. Disguising the Key as a Log File
-bash
-Copy
-Edit
-./veriduct.py encode ~/Documents/my-project ~/output --disguise log
-Same chunking as before, but the key references are written in a .log file (e.g., veriduct_key.log).
-
-3. Encrypting the Key
-bash
-Copy
-Edit
-./veriduct.py encode ~/Documents/my-project ~/output --encrypt
-Generates veriduct.key.enc in ~/output.
-
-Prints the encryption key (Base64) to the terminal. Store this key securely!
-
-4. Decoding a Disguised Key
-bash
-Copy
-Edit
-./veriduct.py decode ~/output/veriduct_key.log ~/restored --disguise log
-Reads the disguised log key.
-
-Fetches chunks from veriduct_dict/ to rebuild the original file(s) in ~/restored.
-
-5. Decoding an Encrypted Key
-bash
-Copy
-Edit
-./veriduct.py decode ~/output/veriduct.key.enc ~/restored --decrypt "<your-fernet-key>"
-Decrypts the key with the provided Fernet key.
-
-Reconstructs original files in ~/restored.
-
-License - 
-This project is distributed under the GNU General Public License (GPL) v3.0
-
-Disclaimer - 
-This tool is provided “as is” and is intended only for lawful purposes such as secure data backup and retrieval, proof-of-concept demonstrations, and educational use. The author(s) disclaim all liability for use or misuse of this tool. Please use responsibly.
-
-Contributing - 
-Fork the repository on GitHub.
-
-Create a new branch for your changes.
-
-Commit and push your changes.
-
-Open a Pull Request describing your modifications.
-
-All contributions (bug reports, feature suggestions, pull requests) are welcome!
+Veriduct is under active development.
+The ideas are stable. The implementation is modular and open.
+Pull requests, suggestions, and adaptation discussions welcome.

@@ -42,7 +42,7 @@ The fragments look like junk. And they don’t match signatures, extensions, or 
 
 ⸻
 
-Modules
+Modules:
 	•	BlobDropper – Fragments files, stores meaningless pieces, deletes originals
 	•	KeyDisguiser – Stores the only way to reconstruct the data, disguises the map
 	•	Propagator – Spreads silently across devices via known lateral movement methods

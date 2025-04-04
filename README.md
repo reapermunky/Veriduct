@@ -71,7 +71,7 @@ Disclaimer
 This project is provided as-is, for educational and ethical research purposes only.
 The author is not responsible for misuse, unlawful deployment, or harm resulting from third-party modification or weaponization.
 
-Don’t be a jackass. Use it for freedom, not chaos.
+Use it for freedom, not chaos.
 
 ⸻
 

@@ -20,12 +20,12 @@ You can’t crack what doesn’t mean anything.
 Who Is This For?
 
 This tool is for people who operate in environments where being seen trying to protect data can be as dangerous as the data itself.
-	•	Journalists working in authoritarian regions
-	•	Whistleblowers needing plausible deniability
-	•	Activists dodging surveillance tools that flag encryption
-	•	Security researchers exploring nontraditional data resilience
-	•	Developers looking to integrate semantic erasure in privacy-first software
-	•	Anyone asking the question:
+		Journalists working in authoritarian regions.
+		Whistleblowers needing plausible deniability.
+		Activists dodging surveillance tools that flag encryption.
+		Security researchers exploring nontraditional data resilience.
+		Developers looking to integrate semantic erasure in privacy-first software.
+		Anyone asking the question:
 “What if my files could disappear without disappearing?”
 
 ⸻

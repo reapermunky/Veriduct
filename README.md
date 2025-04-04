@@ -43,10 +43,10 @@ The fragments look like junk. And they don’t match signatures, extensions, or 
 ⸻
 
 Modules:
-	•	BlobDropper – Fragments files, stores meaningless pieces, deletes originals
-	•	KeyDisguiser – Stores the only way to reconstruct the data, disguises the map
-	•	Propagator – Spreads silently across devices via known lateral movement methods
-	•	TriggerSystem – Executes context erasure by time, signal, manual drop, or remote call
+		BlobDropper – Fragments files, stores meaningless pieces, deletes originals
+		KeyDisguiser – Stores the only way to reconstruct the data, disguises the map
+		Propagator – Spreads silently across devices via known lateral movement methods
+		TriggerSystem – Executes context erasure by time, signal, manual drop, or remote call
 
 Each module is clean, isolated, and optional. Customize it. Weaponize it. Or integrate it into something entirely new.
 

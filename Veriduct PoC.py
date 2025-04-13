@@ -9,10 +9,6 @@ Dependencies:
   - cryptography
   - zstandard
 
-For dependency management, consider adding a requirements.txt:
-  pysqlite3  # Ensure you have this
-  cryptography>=3.0.0
-  zstandard>=0.15.2
 """
 
 import os

@@ -1,3 +1,5 @@
+[![License: Dual - Apache 2.0 & Commercial](https://img.shields.io/badge/license-Apache%202.0%20%26%20Commercial-blue.svg)](LICENSE)
+
 # Veriduct: Stealth File Encoding and Decoding Framework
 
 **Veriduct** is a novel data security framework that employs a technique called "semantic erasure" to encode and decode files.  Instead of simply encrypting data, Veriduct fragments files into numerous meaningless chunks, requiring a specific key to reassemble them. This approach aims to minimize the impact of data breaches by rendering stolen data unusable without the key.

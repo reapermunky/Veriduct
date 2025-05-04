@@ -1,47 +1,98 @@
 [![License: Dual - Apache 2.0 & Commercial](https://img.shields.io/badge/license-Apache%202.0%20%26%20Commercial-blue.svg)](LICENSE)
+# Veriduct: A Framework for Semantic Erasure and Post-Encryption Data Control
 
-# Veriduct: Stealth File Encoding and Decoding Framework
+**Veriduct doesn’t encrypt your data — it destroys its meaning.**  
+It fragments files into semantically isolated chunks, stores them in an encrypted SQLCipher database, and emits a disguised reassembly key. Without the key, your data is **unrecoverable and unrecognizable**.
 
-**Veriduct** is a novel data security framework that employs a technique called "semantic erasure" to encode and decode files.  Instead of simply encrypting data, Veriduct fragments files into numerous meaningless chunks, requiring a specific key to reassemble them. This approach aims to minimize the impact of data breaches by rendering stolen data unusable without the key.
+This isn’t a wrapper around cryptography. It’s a new layer **beneath** it.
 
-**Key Features:**
+---
 
-* **Semantic Erasure:** The core concept of fragmenting data into meaningless chunks.
-* **Chunk Storage:** Secure storage of data fragments (currently implemented using an encrypted SQLite database).
-* **Key Management:** Key derivation using PBKDF2 for enhanced security.
-* **Key Disguising:** Optional key disguising in various formats (CSV, log, conf).
-* **File Reconstruction:** Decoding process to reassemble original files from chunks using the key.
-* **Proof of Concept:** This project is a proof-of-concept and is intended for educational and research purposes.
+## Key Features
 
-**Technical Details:**
+- **Semantic Erasure:** Chunks carry no meaningful structure, metadata, or patterns. Files become forensic dead-ends.
+- **Encrypted/Disguised Keymaps:** Output keys in formats like `.csv`, `.log`, or `.conf` — or encrypt them using password-derived AES via Fernet.
+- **Encrypted SQL Storage:** Uses SQLCipher-compatible SQLite DB with PBKDF2-HMAC-SHA256 keying.
+- **Post-Quantum Resilience:** Removes ciphertext artifacts and attack surfaces before quantum threats can even apply.
+- **Total Control:** You can encode, disguise, destroy, and selectively decode — all from the CLI.
 
-* **Language:** Python
-* **Dependencies:**
-    * pysqlite3 (for SQLite database)
-    * cryptography
-    * zstandard
-* **Chunking:** Files are split into chunks.
-* **Key Generation:** A key is used to map chunks to their original file and order.
-* **Key Security:** The key can be encrypted.
-* **Storage:** Chunks are stored in a database.
+---
 
-**Disclaimer:**
+## Why?
 
-This tool is for educational and research purposes only.  It is not intended for production use.  The author is not responsible for any misuse.  Security audits and further development are required for real-world applications.
+Traditional encryption creates ciphertext: detectable, analyzable, and sometimes even recoverable with enough time or future compute power. Veriduct bypasses that entirely. It turns files into **meaningless entropy** unless paired with the correct reconstruction logic.
 
-**Current Status:**
+If the key is deleted, the data isn't just unreadable — it's **irreversibly uninterpretable**.
 
-This project is under active development.  The current implementation provides a functional proof-of-concept, but further improvements are needed, particularly in:
+---
 
-* Performance optimization
-* Enhanced security measures
-* Robust error handling
-* Comprehensive testing
+## Use Cases
 
-**License:**
+- **Secure messaging / post-encryption channels**
+- **Stealth file delivery / exfiltration**
+- **Keyless self-destructing data**
+- **Anti-forensic archival**
+- **Quantum-resistant storage primitives**
 
-Apache 2.0
+---
 
-**Author:**
+## Basic Usage
 
-reapermunky
+### Encoding
+
+```bash
+python veriduct.py encode myfiles/ outdir/ --encrypt
+```
+
+- Stores data as fragments in a secure SQLite DB
+- Writes a password-encrypted key file (`veriduct.key.enc`) or disguised output
+
+### Disguise Key Instead
+
+```bash
+python veriduct.py encode myfiles/ outdir/ --disguise log
+```
+
+Output will look like a system log file with fake timestamps and noise.
+
+---
+
+### Decoding
+
+```bash
+python veriduct.py decode outdir/veriduct.key.enc restored/ --decrypt
+```
+
+Prompts for password and rebuilds original files in `restored/`.
+
+---
+
+## Example: Disguised Log Output
+
+```
+2025-05-04T01:18:07 [INFO] secrets.docx ChunkRef: e9af12...
+2025-05-04T01:18:08 [WARN] secrets.docx ChunkRef: a3c21f...
+```
+
+---
+
+## Architecture Highlights
+
+- `SecureChunkStorage`: Encrypted SQL interface for storing and retrieving chunks
+- `disguise_key()`: Flexible keymap disguise logic (CSV, log, conf)
+- `derive_fernet_key()`: PBKDF2-HMAC key derivation for secure key encryption
+- CLI-based with `argparse`, ready for integration or automation
+
+---
+
+## Legal
+
+**For research and educational purposes only.**  
+Author assumes no responsibility for misuse.
+
+---
+
+## Contact
+
+Built by Christopher Aziz  
+[GitHub](https://github.com/reapermunky) | chrisaziz@proton.me linkedin.com/in/christopher-aziz/

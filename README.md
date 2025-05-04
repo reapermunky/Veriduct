@@ -1,7 +1,7 @@
 [![License: Dual - Apache 2.0 & Commercial](https://img.shields.io/badge/license-Apache%202.0%20%26%20Commercial-blue.svg)](LICENSE)
 # Veriduct: A Framework for Semantic Erasure and Post-Encryption Data Control
 
-**Veriduct doesn’t encrypt your data — it destroys its meaning.**  
+**Veriduct doesn’t encrypt your data - it destroys its meaning.**  
 It fragments files into semantically isolated chunks, stores them in an encrypted SQLCipher database, and emits a disguised reassembly key. Without the key, your data is **unrecoverable and unrecognizable**.
 
 This isn’t a wrapper around cryptography. It’s a new layer **beneath** it.
@@ -11,10 +11,10 @@ This isn’t a wrapper around cryptography. It’s a new layer **beneath** it.
 ## Key Features
 
 - **Semantic Erasure:** Chunks carry no meaningful structure, metadata, or patterns. Files become forensic dead-ends.
-- **Encrypted/Disguised Keymaps:** Output keys in formats like `.csv`, `.log`, or `.conf` — or encrypt them using password-derived AES via Fernet.
+- **Encrypted/Disguised Keymaps:** Output keys in formats like `.csv`, `.log`, or `.conf` - or encrypt them using password-derived AES via Fernet.
 - **Encrypted SQL Storage:** Uses SQLCipher-compatible SQLite DB with PBKDF2-HMAC-SHA256 keying.
 - **Post-Quantum Resilience:** Removes ciphertext artifacts and attack surfaces before quantum threats can even apply.
-- **Total Control:** You can encode, disguise, destroy, and selectively decode — all from the CLI.
+- **Total Control:** You can encode, disguise, destroy, and selectively decode - all from the CLI.
 
 ---
 
@@ -22,7 +22,7 @@ This isn’t a wrapper around cryptography. It’s a new layer **beneath** it.
 
 Traditional encryption creates ciphertext: detectable, analyzable, and sometimes even recoverable with enough time or future compute power. Veriduct bypasses that entirely. It turns files into **meaningless entropy** unless paired with the correct reconstruction logic.
 
-If the key is deleted, the data isn't just unreadable — it's **irreversibly uninterpretable**.
+If the key is deleted, the data isn't just unreadable - it's **irreversibly uninterpretable**.
 
 ---
 

@@ -6,10 +6,10 @@ It is intended for legal and ethical use. The author is not responsible for any 
 This tool implements the Universal Substrate Format (USF) principle of semantic
 annihilation through structural destruction, *without using encryption*.
 
-WARNING: The USF header randomization is an *irreversible* process. Reassembly
-recreates the USF-modified data stream, *not* the original file bytes. The
-original file header is permanently lost. Do not use this tool on data you
-cannot afford to lose unless you fully understand the process.
+WARNING: The USF header randomization is an *irreversible* process on the stored chunks.
+However, with the key, the *original* file header can be restored. Reassembly
+recreates the USF-modified data stream, *then* restores the original header.
+Without the key, the original file header is permanently lost in the chunk data.
 
 WARNING: The SQLite database is *not* encrypted. While file headers are
 obliterated in the chunks, the chunk data itself is stored raw. An attacker
@@ -21,6 +21,11 @@ Dependencies:
     - pysqlite3 (for SQLite)
     - zstandard
     - hmac # For optional tamper detection
+
+For dependency management, consider adding a requirements.txt:
+    pysqlite3
+    zstandard>=0.15.2
+    # hmac is included in Python standard library >= 2.2
 
 """
 
@@ -34,7 +39,7 @@ import zstandard as zstd
 import random
 import logging
 import base64
-import hmac
+import hmac # Import hmac module
 
 import sqlite3
 
@@ -55,10 +60,11 @@ BATCH_FLUSH_THRESHOLD = 1000
 FILE_SALT_SIZE = 16 # 128 bits recommended
 
 # Keymap Format Version - Increment when the keymap structure changes significantly
-KEYMAP_FORMAT_VERSION = 3
+KEYMAP_FORMAT_VERSION = 4
 # Format Version 1: Initial JSON structure, no salt, file_hash of original file (removed)
 # Format Version 2: JSON structure includes "format_version", "file_salt", "usf_hash" (hash of USF stream), "key" (salted chunk hashes)
 # Format Version 3: Added optional "mac" (HMAC) field
+# Format Version 4: Added "original_header" field (base64-encoded bytes)
 
 
 def calculate_salted_chunk_hash(salt: bytes, chunk_data: bytes) -> str:
@@ -206,13 +212,13 @@ def disguise_key(key_data: dict, out_dir: str, style: str):
     """Disguise key data in a specified format and write to output file."""
     # key_data now includes 'format_version', filenames as keys.
     # Each file entry includes 'file_salt' (bytes), 'usf_hash' (str),
-    # optional 'mac' (str), and 'key' (list of salted hashes).
+    # optional 'mac' (str), 'original_header' (bytes), and 'key' (list of salted hashes).
     ensure_dirs(out_dir)
 
     output_path = os.path.join(out_dir, f"veriduct_key.{style}")
 
     try:
-        # Ensure salt is base64 encoded for serialization
+        # Ensure salt and original_header are base64 encoded for serialization
         serializable_key_data = {"format_version": key_data.get('format_version', 'N/A')}
         for fname, data in key_data.items():
             if fname == 'format_version': continue
@@ -220,6 +226,7 @@ def disguise_key(key_data: dict, out_dir: str, style: str):
                  "file_salt": base64.b64encode(data.get("file_salt", b"")).decode('ascii'),
                  "usf_hash": data.get("usf_hash", ""),
                  "mac": data.get("mac", ""), # Include optional MAC
+                 "original_header": base64.b64encode(data.get("original_header", b"")).decode('ascii'), # Include original header
                  "key": data.get("key", [])
             }
 
@@ -228,21 +235,22 @@ def disguise_key(key_data: dict, out_dir: str, style: str):
             with open(output_path, "w", encoding="utf-8") as f:
                 # Add version, salt, usf_hash, and mac headers
                 f.write(f"# Veriduct Keymap Format Version: {serializable_key_data.get('format_version', 'N/A')}\n")
-                f.write("filename,file_salt,usf_hash,mac,chunk_id,chunk_hash\n") # Added mac column
+                f.write("filename,file_salt,usf_hash,mac,original_header,chunk_id,chunk_hash\n") # Added mac, original_header column
                 for fname, data in serializable_key_data.items():
                     if fname == 'format_version': continue
 
                     file_salt_b64 = data["file_salt"]
                     usf_hash = data["usf_hash"]
                     mac = data["mac"]
+                    original_header_b64 = data["original_header"]
 
                     for i, ch in enumerate(data["key"]):
-                        # Include salt, usf_hash, and mac on the first row for each file
+                        # Include salt, usf_hash, mac, and original_header on the first row for each file
                         if i == 0:
-                             f.write(f"{fname},{file_salt_b64},{usf_hash},{mac},{i},{ch}\n")
+                             f.write(f"{fname},{file_salt_b64},{usf_hash},{mac},{original_header_b64},{i},{ch}\n")
                         else:
                              # Leave metadata columns empty for subsequent chunks
-                             f.write(f"{fname},,,,{i},{ch}\n")
+                             f.write(f"{fname},,,,,{i},{ch}\n")
 
         elif style == "log":
             with open(output_path, "w", encoding="utf-8") as f:
@@ -253,9 +261,10 @@ def disguise_key(key_data: dict, out_dir: str, style: str):
                     file_salt_b64 = data["file_salt"]
                     usf_hash = data["usf_hash"]
                     mac = data["mac"]
+                    original_header_b64 = data["original_header"]
 
-                    # Add specific log entries for file metadata, including MAC
-                    f.write(f"[{datetime.datetime.now().isoformat()}] [INFO] FileMetadata: File={fname} Salt={file_salt_b64} USFHash={usf_hash} MAC={mac}\n")
+                    # Add specific log entries for file metadata, including MAC and OriginalHeader
+                    f.write(f"[{datetime.datetime.now().isoformat()}] [INFO] FileMetadata: File={fname} Salt={file_salt_b64} USFHash={usf_hash} MAC={mac} OriginalHeader={original_header_b64}\n")
 
                     for i, ch in enumerate(data["key"]):
                         ts = datetime.datetime.now().isoformat()
@@ -273,13 +282,16 @@ def disguise_key(key_data: dict, out_dir: str, style: str):
                     file_salt_b64 = data["file_salt"]
                     usf_hash = data["usf_hash"]
                     mac = data["mac"]
+                    original_header_b64 = data["original_header"]
 
                     f.write(f"[{fname}]\n")
-                    # Add salt, usf_hash, and mac entries under the section
+                    # Add salt, usf_hash, mac, and original_header entries under the section
                     f.write(f"file_salt = {file_salt_b64}\n")
                     f.write(f"usf_hash = {usf_hash}\n")
                     if mac: # Only write MAC if present
                         f.write(f"mac = {mac}\n")
+                    if original_header_b64: # Only write original_header if present
+                        f.write(f"original_header = {original_header_b64}\n")
                     for i, ch in enumerate(data["key"]):
                         f.write(f"chunk{i} = {ch}\n")
                     f.write("\n") # Add newline between files
@@ -318,7 +330,7 @@ def decode_disguised_key(key_path: str, style: str) -> dict:
 
         # Now parse the actual key data based on style
         # Use a buffer to collect metadata and chunk hashes for each file
-        file_buffer = {} # {fname: {"file_salt_b64": ..., "usf_hash": ..., "mac": ..., "chunk_hashes_with_ids": [(id, hash), ...]}}
+        file_buffer = {} # {fname: {"file_salt_b64": ..., "usf_hash": ..., "mac": ..., "original_header_b64": ..., "chunk_hashes_with_ids": [(id, hash), ...]}}
 
         if style == "csv":
             # Skip header lines including the version and column names
@@ -329,22 +341,24 @@ def decode_disguised_key(key_path: str, style: str) -> dict:
 
             for line in data_lines:
                 parts = line.strip().split(",")
-                if len(parts) != 6: # Expect 6 columns now: filename, salt_b64, usf_hash, mac, chunk_id, chunk_hash
+                if len(parts) != 7: # Expect 7 columns now: filename, salt_b64, usf_hash, mac, original_header, chunk_id, chunk_hash
                     logging.debug(f"Skipping malformed CSV line: {line.strip()}")
                     continue
-                fname, file_salt_b64, usf_hash, mac, chunk_id_str, chunk_hash = parts
+                fname, file_salt_b64, usf_hash, mac, original_header_b64, chunk_id_str, chunk_hash = parts
 
                 if fname not in file_buffer:
                     file_buffer[fname] = {
                          "file_salt_b64": file_salt_b64 if file_salt_b64 else None,
                          "usf_hash": usf_hash if usf_hash else None,
                          "mac": mac if mac else None,
+                         "original_header_b64": original_header_b64 if original_header_b64 else None, # New field
                          "chunk_hashes_with_ids": [] # Collect (id, hash) tuples
                          }
                 else: # Update buffer with metadata if found on subsequent lines (defensive)
                      if file_buffer[fname].get("file_salt_b64") is None: file_buffer[fname]["file_salt_b64"] = file_salt_b64 if file_salt_b64 else None
                      if file_buffer[fname].get("usf_hash") is None: file_buffer[fname]["usf_hash"] = usf_hash if usf_hash else None
                      if file_buffer[fname].get("mac") is None: file_buffer[fname]["mac"] = mac if mac else None
+                     if file_buffer[fname].get("original_header_b64") is None: file_buffer[fname]["original_header_b64"] = original_header_b64 if original_header_b64 else None
 
 
                 # Collect chunk hash and index
@@ -360,12 +374,13 @@ def decode_disguised_key(key_path: str, style: str) -> dict:
             for line in lines:
                 line_strip = line.strip()
                 if "FileMetadata: File=" in line_strip and "Salt=" in line_strip and "USFHash=" in line_strip:
-                     # Parse file metadata line, including MAC
+                     # Parse file metadata line, including MAC and OriginalHeader
                      parts = line_strip.split()
                      fname = None
                      file_salt_b64 = None
                      usf_hash = None
-                     mac = None # Initialize mac
+                     mac = None
+                     original_header_b64 = None # Initialize original_header_b64
                      for part in parts:
                          if part.startswith("File="):
                              fname = part.split("=", 1)[1]
@@ -373,15 +388,17 @@ def decode_disguised_key(key_path: str, style: str) -> dict:
                              file_salt_b64 = part.split("=", 1)[1]
                          elif part.startswith("USFHash="):
                              usf_hash = part.split("=", 1)[1]
-                         elif part.startswith("MAC="): # Parse MAC
+                         elif part.startswith("MAC="):
                              mac = part.split("=", 1)[1]
-
+                         elif part.startswith("OriginalHeader="): # Parse OriginalHeader
+                             original_header_b64 = part.split("=", 1)[1]
 
                      if fname:
                           file_buffer[fname] = {
                               "file_salt_b64": file_salt_b64 if file_salt_b64 != "N/A" else None,
                               "usf_hash": usf_hash if usf_hash != "N/A" else None,
-                              "mac": mac if mac != "N/A" else None, # Store MAC
+                              "mac": mac if mac != "N/A" else None,
+                              "original_header_b64": original_header_b64 if original_header_b64 != "N/A" else None, # Store OriginalHeader
                               "chunk_hashes_with_ids": []
                               }
                      else:
@@ -406,7 +423,7 @@ def decode_disguised_key(key_path: str, style: str) -> dict:
                               chunk_hash = part.split("=", 1)[1]
 
                     if fname and chunk_id is not None and chunk_hash:
-                         file_buffer.setdefault(fname, {"file_salt_b64": None, "usf_hash": None, "mac": None, "chunk_hashes_with_ids": []}) # Ensure buffer entry exists
+                         file_buffer.setdefault(fname, {"file_salt_b64": None, "usf_hash": None, "mac": None, "original_header_b64": None, "chunk_hashes_with_ids": []}) # Ensure buffer entry exists
                          file_buffer[fname]["chunk_hashes_with_ids"].append((chunk_id, chunk_hash))
                     else:
                          logging.debug(f"Skipping incomplete LOG chunk line: {line_strip}")
@@ -425,7 +442,7 @@ def decode_disguised_key(key_path: str, style: str) -> dict:
                          # Store data for the previous file from the buffer entry
                          file_buffer[current_file] = file_buffer_entry
                     current_file = line_strip[1:-1]
-                    file_buffer_entry = {"file_salt_b64": None, "usf_hash": None, "mac": None, "chunk_hashes_with_ids": []} # Init buffer for new file
+                    file_buffer_entry = {"file_salt_b64": None, "usf_hash": None, "mac": None, "original_header_b64": None, "chunk_hashes_with_ids": []} # Init buffer for new file
 
                 elif current_file and "=" in line_strip and file_buffer_entry is not None:
                      parts = line_strip.split("=", 1) # Split only on the first '='
@@ -435,8 +452,10 @@ def decode_disguised_key(key_path: str, style: str) -> dict:
                           file_buffer_entry["file_salt_b64"] = value
                      elif key == "usf_hash":
                           file_buffer_entry["usf_hash"] = value
-                     elif key == "mac": # Parse MAC
+                     elif key == "mac":
                           file_buffer_entry["mac"] = value
+                     elif key == "original_header": # Parse OriginalHeader
+                          file_buffer_entry["original_header_b64"] = value
                      elif key.startswith("chunk"):
                           try:
                               chunk_id = int(key[len("chunk"):]) # Extract index after "chunk"
@@ -456,7 +475,7 @@ def decode_disguised_key(key_path: str, style: str) -> dict:
             # Should not be reached
             raise ValueError(f"Unknown disguise style: {style}")
 
-        # Process buffered data for each file: decode salt, sort chunks by ID, check for missing salt
+        # Process buffered data for each file: decode salt, header, sort chunks by ID, check for missing salt
         for fname, data in list(file_buffer.items()): # Iterate over a copy
             file_salt = None
             if data.get("file_salt_b64"):
@@ -473,6 +492,15 @@ def decode_disguised_key(key_path: str, style: str) -> dict:
                  del file_buffer[fname] # Remove entry if salt is missing
                  continue # Move to next file
 
+            original_header_bytes = None
+            if data.get("original_header_b64"):
+                 try:
+                      original_header_bytes = base64.b64decode(data["original_header_b64"])
+                 except Exception as e:
+                      logging.error(f"Failed to decode original header for file '{fname}': {e}")
+                      # This is not critical to reassembly of USF stream, but restoration will fail.
+                      original_header_bytes = None # Ensure it's None if decoding fails
+
             # Sort chunk hashes by ID
             chunk_hashes_with_ids = data.get("chunk_hashes_with_ids", [])
             sorted_chunk_hashes = [h for id, h in sorted(chunk_hashes_with_ids, key=lambda item: item[0])]
@@ -487,6 +515,7 @@ def decode_disguised_key(key_path: str, style: str) -> dict:
                  "file_salt": file_salt, # Store decoded salt bytes
                  "usf_hash": data.get("usf_hash"),
                  "mac": data.get("mac"), # Store MAC string
+                 "original_header": original_header_bytes, # Store decoded original header bytes
                  "key": sorted_chunk_hashes # Store sorted list of chunk hashes
                  }
 
@@ -497,7 +526,7 @@ def decode_disguised_key(key_path: str, style: str) -> dict:
     # Check keymap format version
     loaded_version = key_map.get("format_version")
     if loaded_version is None:
-         logging.warning("Keymap format version not found in key file. Assuming latest version.")
+         logging.warning("Keymap format version not found in key file. Assuming latest version for parsing.")
          # Decide if missing version is a failure. For safety, require it or warn heavily.
          # Let's allow missing but assume latest, which might fail on salted hashes etc.
          # A stricter approach would be sys.exit(2) unless ignore_version is set.
@@ -532,7 +561,8 @@ def annihilate_path(input_path, out_dir, wipe_size, add_hmac=False, disguise=Non
     breaks the modified data into chunks, stores them in a database, and
     outputs a non-encrypted, optionally disguised, key mapping.
     The hash stored in the keymap is the hash of the *USF-modified* data stream.
-    The original file header is permanently lost.
+    The original file header is permanently lost in the stored chunks, but can
+    be restored using the keymap.
     Chunk hashes are salted per file to prevent cross-collection correlation.
     Optionally calculates an HMAC over the USF hash using the file salt for tamper detection.
     """
@@ -628,10 +658,16 @@ def annihilate_path(input_path, out_dir, wipe_size, add_hmac=False, disguise=Non
         key_sequence = []
         chunks_to_store_batch = [] # Collect chunks for batch insert
         usf_data_hasher = hashlib.sha256() # Hasher for the USF-modified data stream
+        original_file_header_bytes = b'' # Initialize placeholder for original header
 
         logging.info(f"Annihilating file ({processed_count+1}/{total_files}): {rel_path}")
         try:
             with open(fpath_abs, "rb") as f:
+                # --- Extract original header BEFORE any chunk processing ---
+                # Read the first 'wipe_size' bytes. If file is smaller, read what's available.
+                original_file_header_bytes = f.read(wipe_size)
+                f.seek(0) # Reset file pointer to the beginning for normal chunking loop to read from start
+
                 bytes_processed = 0
 
                 while True:
@@ -702,6 +738,7 @@ def annihilate_path(input_path, out_dir, wipe_size, add_hmac=False, disguise=Non
                  "file_salt": file_salt, # Store salt bytes
                  "usf_hash": usf_stream_hash, # Store hash of the USF data stream
                  "mac": mac_tag, # Store optional MAC tag (hex string)
+                 "original_header": original_file_header_bytes, # Store original header bytes
                  "key": key_sequence # Store sequence of salted chunk hashes
                  }
             processed_count += 1 # Increment count only on successful file processing
@@ -720,8 +757,8 @@ def annihilate_path(input_path, out_dir, wipe_size, add_hmac=False, disguise=Non
     try:
         # Note: Keymap JSON structure includes "format_version", filenames as keys,
         # each file entry includes "file_salt" (bytes), "usf_hash" (str),
-        # optional "mac" (str), and "key" (list of salted hashes).
-        # Convert salt bytes to base64 string *before* JSON dumping/disguising
+        # optional "mac" (str), "original_header" (bytes), and "key" (list of salted hashes).
+        # Convert salt bytes and original_header bytes to base64 string *before* JSON dumping/disguising
         serializable_key_map = {"format_version": key_map.get("format_version", KEYMAP_FORMAT_VERSION)}
         for fname, data in key_map.items():
             if fname == 'format_version': continue
@@ -729,6 +766,7 @@ def annihilate_path(input_path, out_dir, wipe_size, add_hmac=False, disguise=Non
                  "file_salt": base64.b64encode(data.get("file_salt", b"")).decode('ascii'),
                  "usf_hash": data.get("usf_hash", ""),
                  "mac": data.get("mac", ""),
+                 "original_header": base64.b64encode(data.get("original_header", b"")).decode('ascii'),
                  "key": data.get("key", [])
             }
 
@@ -761,7 +799,7 @@ def reassemble_path(key_path, out_dir, disguise=None, ignore_integrity=False, ve
     reconstructs the USF-modified files, and verifies the SHA-256 hash of the
     reconstructed USF data stream against the hash stored during annihilation.
     Optionally verifies an HMAC tag for tamper detection.
-    The original file header is *not* restored, as it was permanently randomized.
+    Finally, it restores the original header if present in the keymap.
 
     Args:
         key_path (str): Path to key file.
@@ -789,7 +827,7 @@ def reassemble_path(key_path, out_dir, disguise=None, ignore_integrity=False, ve
     # Read and decode the key file
     try:
         if disguise:
-            # decode_disguised_key handles version check and salt/mac decoding
+            # decode_disguised_key handles version check and salt/mac/header decoding
             decoded_key_map = decode_disguised_key(key_path_abs, disguise)
         else:
             with open(key_path_abs, "rb") as kf:
@@ -802,12 +840,12 @@ def reassemble_path(key_path, out_dir, disguise=None, ignore_integrity=False, ve
 
                 raw_key_map = json.loads(data.decode("utf-8"))
 
-            # Standard JSON keymap needs salt/mac decoding and version check
+            # Standard JSON keymap needs salt/mac/header decoding and version check
             loaded_version = raw_key_map.get("format_version")
             if loaded_version is None:
-                 logging.warning("Keymap format version not found in standard key file. Assuming latest version.")
+                 logging.warning("Keymap format version not found in standard key file. Assuming latest version for parsing.")
                  # Let's enforce version check for safety unless explicitly ignored (not implemented)
-                 if KEYMAP_FORMAT_VERSION != 3: # Check if we are on version 3 and file is not marked
+                 if KEYMAP_FORMAT_VERSION != 4: # Check if we are on version 4 and file is not marked
                       logging.error(f"Keymap format version missing. This key file might be incompatible. Expected {KEYMAP_FORMAT_VERSION}.")
                       return 1 # Indicate failure
 
@@ -817,7 +855,7 @@ def reassemble_path(key_path, out_dir, disguise=None, ignore_integrity=False, ve
                  return 1 # Exit on version mismatch
 
             decoded_key_map = {}
-            # Decode salts and store other metadata for each file entry
+            # Decode salts, headers, and store other metadata for each file entry
             for fname, data in raw_key_map.items():
                  if fname == 'format_version': continue
                  file_salt_b64 = data.get("file_salt")
@@ -834,11 +872,21 @@ def reassemble_path(key_path, out_dir, disguise=None, ignore_integrity=False, ve
                       logging.error(f"File salt missing for '{fname}' in keymap. Cannot reassemble chunks.")
                       continue # Skip this file
 
+                 original_header_b64 = data.get("original_header")
+                 original_header_bytes = None
+                 if original_header_b64:
+                      try:
+                           original_header_bytes = base64.b64decode(original_header_b64)
+                      except Exception as e:
+                           logging.warning(f"Failed to decode original header for file '{fname}' from keymap: {e}")
+                           original_header_bytes = None # Set to None if decoding fails
+
 
                  decoded_key_map[fname] = {
                       "file_salt": file_salt, # Store decoded salt bytes
                       "usf_hash": data.get("usf_hash"),
                       "mac": data.get("mac"), # Store MAC string
+                      "original_header": original_header_bytes, # Store decoded original header bytes
                       "key": data.get("key", []) # Store list of salted hashes
                  }
 
@@ -881,6 +929,7 @@ def reassemble_path(key_path, out_dir, disguise=None, ignore_integrity=False, ve
         expected_usf_hash = data.get("usf_hash")
         file_salt = data.get("file_salt") # This should be bytes now
         expected_mac = data.get("mac") # This should be the hex string
+        original_header_bytes = data.get("original_header") # This should be bytes now
         chunk_hashes_sequence = data.get("key", []) # List of salted hashes
 
         if file_salt is None:
@@ -891,7 +940,7 @@ def reassemble_path(key_path, out_dir, disguise=None, ignore_integrity=False, ve
 
 
         missing_chunks = False
-        reconstruction_hasher = hashlib.sha256() # Hasher for the data as it's reconstructed
+        reconstruction_hasher = hashlib.sha256() # Hasher for the data as it's reconstructed (USF-modified stream)
 
         # --- Implement Streaming Write ---
         output_file = None # File handle for writing
@@ -909,12 +958,10 @@ def reassemble_path(key_path, out_dir, disguise=None, ignore_integrity=False, ve
                     logging.error(f"Missing chunk: {salted_chash} for file '{rel_path}'. File reassembly incomplete.")
                     missing_chunks = True
                     # Stop reassembly for this file on first missing chunk
-                    # If ignoring, we'd skip the break and update hasher/write with zero/placeholder?
-                    # Sticking to: stop writing and mark as failed on first missing chunk.
                     integrity_check_passed = False # Missing chunk is an integrity failure
                     break # Exit chunk loop for this file
 
-                # Update the hash of the reassembled stream
+                # Update the hash of the reassembled USF-modified stream
                 reconstruction_hasher.update(chunk_data)
 
                 # Write the chunk data directly to the output file
@@ -989,8 +1036,22 @@ def reassemble_path(key_path, out_dir, disguise=None, ignore_integrity=False, ve
 
              continue # Move to the next file
 
-        # If we reached here, integrity_check_passed is True (either passed or ignoring)
-        # File is already written via streaming
+        # If integrity check passed (or ignored), proceed to header restoration
+        if original_header_bytes: # Check if original header was stored in keymap
+             try:
+                  # Reopen file in read-write binary mode ('rb+') to overwrite the beginning
+                  with open(full_out_path, "rb+") as outf_patch:
+                       outf_patch.write(original_header_bytes) # Overwrite the first N bytes
+                  logging.info(f"Original header restored for file: {rel_path}")
+             except Exception as header_e:
+                  logging.error(f"Error restoring original header for '{rel_path}': {header_e}. "
+                                "File may be present but still semantically annihilated.")
+                  # This is a post-assembly step, so it doesn't prevent reassembly count increment.
+                  # But it does mean the file isn't fully restored to its original state.
+        else:
+             logging.debug(f"No original header found in keymap for '{rel_path}', skipping restoration.")
+
+
         reassembled_count += 1 # Increment count only if successfully reassembled and integrity passed/ignored
 
 
@@ -1010,8 +1071,9 @@ def main():
     parser = argparse.ArgumentParser(
         description="Veriduct - the channel beneath control.\n"
                     "Implements Universal Substrate Format (USF) via structural destruction.\n"
-                    "WARNING: This process is irreversible. Reassembly recovers the USF data,\n"
-                    "         NOT the original file header.\n"
+                    "WARNING: This process is irreversible on stored chunks. Reassembly recovers the USF data,\n"
+                    "         then restores the original header if captured in the key. \n"
+                    "         WITHOUT THE KEY, the original file header is permanently lost in the chunk data.\n"
                     "DISCLAIMER: This tool is for educational purposes only. "
                     "The author is not responsible for any misuse."
     )
@@ -1027,7 +1089,7 @@ def main():
         "--wipe-bytes",
         type=int,
         default=DEFAULT_USF_WIPE_SIZE,
-        help=f"Number of bytes to randomize at the start of each file (default: {DEFAULT_USF_WIPE_SIZE})"
+        help=f"Number of bytes to randomize at the start of each file (and store as original header) (default: {DEFAULT_USF_WIPE_SIZE})"
     )
     annihilate_parser.add_argument(
         "--add-hmac",

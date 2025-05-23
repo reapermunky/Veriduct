@@ -21,9 +21,9 @@ Not encryption. This is **semantic annihilation**.
 
 ## Why?
 
-Encryption creates ciphertext – which is inherently recognizable and potentially reversible under future conditions (quantum or otherwise). Veriduct removes the assumption that files need to be "protected." Instead, it makes them **meaningless without instruction**.
+Encryption creates ciphertext, which is inherently recognizable and potentially reversible under future conditions (quantum or otherwise). Veriduct removes the assumption that files need to be "protected." Instead, it makes them **meaningless without instruction**.
 
-If the key is lost, the data is not merely scrambled - it's **irretrievable** in any semantic form.
+If the key is lost, the data is not merely scrambled, it's **irretrievable** in any semantic form.
 
 ---
 

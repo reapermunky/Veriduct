@@ -2,7 +2,7 @@
 
 # Veriduct: A Framework for Semantic Erasure and Post-Cryptographic Data Control
 
-**Veriduct doesn’t encrypt your data - it annihilates its meaning.**  
+**Veriduct doesn’t encrypt your data, it annihilates its meaning.**  
 It fragments files into semantically isolated chunks, strips headers, and emits a disguised reassembly key. Without that key, your data is **permanently uninterpretable**.
 
 This isn’t encryption. This is **semantic annihilation**.

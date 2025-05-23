@@ -1,98 +1,98 @@
 [![License: Dual - Apache 2.0 & Commercial](https://img.shields.io/badge/license-Apache%202.0%20%26%20Commercial-blue.svg)](LICENSE)
-# Veriduct: A Framework for Semantic Erasure and Post-Encryption Data Control
 
-**Veriduct doesn’t encrypt your data - it destroys its meaning.**  
-It fragments files into semantically isolated chunks, stores them in an encrypted SQLCipher database, and emits a disguised reassembly key. Without the key, your data is **unrecoverable and unrecognizable**.
+# Veriduct: A Framework for Semantic Erasure and Post-Cryptographic Data Control
 
-This isn’t a wrapper around cryptography. It’s a new layer **beneath** it.
+**Veriduct doesn’t encrypt your data – it annihilates its meaning.**  
+It fragments files into semantically isolated chunks, strips headers, and emits a disguised reassembly key. Without that key, your data is **permanently uninterpretable**.
+
+This isn’t encryption. This is **semantic annihilation**.
 
 ---
 
 ## Key Features
 
-- **Semantic Erasure:** Chunks carry no meaningful structure, metadata, or patterns. Files become forensic dead-ends.
-- **Encrypted/Disguised Keymaps:** Output keys in formats like `.csv`, `.log`, or `.conf` - or encrypt them using password-derived AES via Fernet.
-- **Encrypted SQL Storage:** Uses SQLCipher-compatible SQLite DB with PBKDF2-HMAC-SHA256 keying.
-- **Post-Quantum Resilience:** Removes ciphertext artifacts and attack surfaces before quantum threats can even apply.
-- **Total Control:** You can encode, disguise, destroy, and selectively decode - all from the CLI.
+- **Cognitive Security Layer:** Fragments carry no metadata, structure, or identifiable patterns. Meaning is destroyed, not just concealed.
+- **Disguised Keymaps:** Output keys in formats like `.csv`, `.log`, or `.conf` to blend into existing systems and workflows.
+- **Header Stripping:** The original file header is removed, stored separately, and re-applied only during valid reassembly.
+- **No Encryption Required:** No ciphertext, no cryptographic weaknesses. Just raw unlabelled entropy.
+- **Irreversible Without Key:** The chunk database is meaningless without the salted keymap – deletion of the key equals total semantic loss.
 
 ---
 
 ## Why?
 
-Traditional encryption creates ciphertext: detectable, analyzable, and sometimes even recoverable with enough time or future compute power. Veriduct bypasses that entirely. It turns files into **meaningless entropy** unless paired with the correct reconstruction logic.
+Encryption creates ciphertext – which is inherently recognizable and potentially reversible under future conditions (quantum or otherwise). Veriduct removes the assumption that files need to be "protected." Instead, it makes them **meaningless without instruction**.
 
-If the key is deleted, the data isn't just unreadable - it's **irreversibly uninterpretable**.
+If the key is lost, the data is not merely scrambled – it's **irretrievable** in any semantic form.
 
 ---
 
 ## Use Cases
 
-- **Secure messaging / post-encryption channels**
-- **Stealth file delivery / exfiltration**
-- **Keyless self-destructing data**
-- **Anti-forensic archival**
-- **Quantum-resistant storage primitives**
+- **Post-encryption secure messaging**
+- **Stealth file transport / anti-forensic archival**
+- **Keyless self-destructing files**
+- **Quantum-neutral secure storage**
+- **Red-team tools & intelligence-grade data handling**
 
 ---
 
-## Basic Usage
+## Usage
 
-### Encoding
-
-```bash
-python veriduct.py encode myfiles/ outdir/ --encrypt
-```
-
-- Stores data as fragments in a secure SQLite DB
-- Writes a password-encrypted key file (`veriduct.key.enc`) or disguised output
-
-### Disguise Key Instead
+### Annihilate (Encode)
 
 ```bash
-python veriduct.py encode myfiles/ outdir/ --disguise log
+python veriduct.py annihilate myfiles/ outdir/ --disguise log
 ```
 
-Output will look like a system log file with fake timestamps and noise.
+- Randomizes the header
+- Shreds file into unlabelled chunks
+- Stores them in a raw SQLite DB
+- Outputs a disguised reassembly key (`veriduct_key.log`)
 
 ---
 
-### Decoding
+### Reassemble (Decode)
 
 ```bash
-python veriduct.py decode outdir/veriduct.key.enc restored/ --decrypt
+python veriduct.py reassemble outdir/veriduct_key.log restored/ --disguise log
 ```
 
-Prompts for password and rebuilds original files in `restored/`.
+- Reads chunk DB
+- Verifies stream integrity (HMAC optional)
+- Restores USF stream and reattaches original header
 
 ---
 
-## Example: Disguised Log Output
+## Sample Log Key Output
 
 ```
-2025-05-04T01:18:07 [INFO] secrets.docx ChunkRef: e9af12...
-2025-05-04T01:18:08 [WARN] secrets.docx ChunkRef: a3c21f...
+2025-05-22T10:12:44 [INFO] FileMetadata: File=secrets.docx Salt=... USFHash=... MAC=... OriginalHeader=...
+2025-05-22T10:12:45 [DEBUG] FileRef=secrets.docx ChunkId=0 ChunkHash=abc123...
+2025-05-22T10:12:45 [INFO] FileRef=secrets.docx ChunkId=1 ChunkHash=def456...
 ```
 
 ---
 
 ## Architecture Highlights
 
-- `SecureChunkStorage`: Encrypted SQL interface for storing and retrieving chunks
-- `disguise_key()`: Flexible keymap disguise logic (CSV, log, conf)
-- `derive_fernet_key()`: PBKDF2-HMAC key derivation for secure key encryption
-- CLI-based with `argparse`, ready for integration or automation
+- `ChunkStorage`: Raw SQLite interface for chunk persistence
+- `disguise_key()`: Converts keymap to fake `.log`, `.csv`, or `.conf` formats
+- Optional per-file HMAC for tamper detection
+- Header randomization using entropy-based wiping
+- All data recoverability hinges on presence of keymap
 
 ---
 
 ## Legal
 
-**For research and educational purposes only.**  
-Author assumes no responsibility for misuse.
+**For educational and research use only.**  
+You are responsible for any deployment or misuse.  
+This tool intentionally destroys semantic data fidelity.
 
 ---
 
 ## Contact
 
-Built by Christopher Aziz  
-[GitHub](https://github.com/reapermunky) | chrisaziz@proton.me linkedin.com/in/christopher-aziz/
+Created by Christopher Aziz  
+[GitHub](https://github.com/reapermunky) | chrisaziz@proton.me | linkedin.com/in/christopher-aziz/

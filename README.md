@@ -2,7 +2,7 @@
 
 # Veriduct: A Framework for Semantic Erasure and Post-Cryptographic Data Control
 
-**Veriduct doesn’t encrypt your data – it annihilates its meaning.**  
+**Veriduct doesn’t encrypt your data - it annihilates its meaning.**  
 It fragments files into semantically isolated chunks, strips headers, and emits a disguised reassembly key. Without that key, your data is **permanently uninterpretable**.
 
 This isn’t encryption. This is **semantic annihilation**.
@@ -15,7 +15,7 @@ This isn’t encryption. This is **semantic annihilation**.
 - **Disguised Keymaps:** Output keys in formats like `.csv`, `.log`, or `.conf` to blend into existing systems and workflows.
 - **Header Stripping:** The original file header is removed, stored separately, and re-applied only during valid reassembly.
 - **No Encryption Required:** No ciphertext, no cryptographic weaknesses. Just raw unlabelled entropy.
-- **Irreversible Without Key:** The chunk database is meaningless without the salted keymap – deletion of the key equals total semantic loss.
+- **Irreversible Without Key:** The chunk database is meaningless without the salted keymap - deletion of the key equals total semantic loss.
 
 ---
 
@@ -23,7 +23,7 @@ This isn’t encryption. This is **semantic annihilation**.
 
 Encryption creates ciphertext – which is inherently recognizable and potentially reversible under future conditions (quantum or otherwise). Veriduct removes the assumption that files need to be "protected." Instead, it makes them **meaningless without instruction**.
 
-If the key is lost, the data is not merely scrambled – it's **irretrievable** in any semantic form.
+If the key is lost, the data is not merely scrambled - it's **irretrievable** in any semantic form.
 
 ---
 

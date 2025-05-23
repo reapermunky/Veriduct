@@ -5,7 +5,7 @@
 **Veriduct doesn’t encrypt your data, it annihilates its meaning.**  
 It fragments files into semantically isolated chunks, strips headers, and emits a disguised reassembly key. Without that key, your data is **permanently uninterpretable**.
 
-This isn’t encryption. This is **semantic annihilation**.
+Not encryption. This is **semantic annihilation**.
 
 ---
 

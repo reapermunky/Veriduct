@@ -22,11 +22,6 @@ Dependencies:
     - zstandard
     - hmac # For optional tamper detection
 
-For dependency management, consider adding a requirements.txt:
-    pysqlite3
-    zstandard>=0.15.2
-    # hmac is included in Python standard library >= 2.2
-
 """
 
 import os

@@ -94,6 +94,17 @@ This tool intentionally destroys semantic data fidelity.
 
 ---
 
+## Licensing Summary
+
+Veriduct is dual-licensed:
+
+- **Apache 2.0 License** (see `LICENSE`): Free for personal, academic, research, nonprofit, and civilian use.
+- **Commercial License** (see `COMMERCIAL_LICENSE.txt`): Required for integration into paid products, commercial services, enterprise infrastructure, government contracts, or military use.
+
+For commercial licensing inquiries, contact: chrisaziz@proton.me
+
+---
+
 ## Contact
 
 Created by Christopher Aziz  

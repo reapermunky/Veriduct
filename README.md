@@ -1,5 +1,7 @@
 [![License: Dual - Apache 2.0 & Commercial](https://img.shields.io/badge/license-Apache%202.0%20%26%20Commercial-blue.svg)](LICENSE)
 
+Veriduct is free to use for nonprofit, humanitarian, or journalistic purposes under the Apache 2.0 license.
+
 # Veriduct: A Framework for Semantic Erasure and Post-Cryptographic Data Control
 
 **Veriduct doesn’t encrypt your data, it annihilates its meaning.**  

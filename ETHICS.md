@@ -1,6 +1,6 @@
 # Ethics Statement for Veriduct
 
-Veriduct was created to redefine the boundaries of civilian data protection in a world where conventional encryption is increasingly insufficient. This tool does not conceal data—it renders it cognitively inert without explicit reassembly intent. Its purpose is not to hide wrongdoing, but to restore **agency over interpretation** itself.
+Veriduct was created to redefine the boundaries of civilian data protection in a world where conventional encryption is increasingly insufficient. This tool does not conceal data - it renders it cognitively inert without explicit reassembly intent. Its purpose is not to hide wrongdoing, but to restore **agency over interpretation** itself.
 
 ## Intended Use
 
@@ -17,7 +17,7 @@ Veriduct is designed to serve individuals and organizations operating under real
 - **Privacy is a right, not a privilege.**
 - **Interpretability is not a default.**
 - **Reconstruction should only occur with willful and contextual alignment.**
-- **The absence of ciphertext is not a crime—it is a paradigm shift.**
+- **The absence of ciphertext is not a crime - it is a paradigm shift.**
 
 ## Boundaries
 
@@ -27,7 +27,7 @@ Veriduct is not intended to:
 - Circumvent reasonable, consent-based data governance
 - Replace ethical decision-making with technological force
 
-It is not a tool for destruction—it is a tool for **detachment**. What you rebuild, and why, remains your responsibility.
+It is not a tool for destruction - it is a tool for **detachment**. What you rebuild, and why, remains your responsibility.
 
 ## Developer Position
 
@@ -37,5 +37,5 @@ Use of this tool constitutes an agreement to uphold these principles.
 
 ---
 
-Veriduct is not just about data—it is about meaning.  
+Veriduct is not just about data - it is about meaning.  
 And meaning belongs to the one who creates it, not the one who seizes it.

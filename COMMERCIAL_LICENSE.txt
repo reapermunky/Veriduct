@@ -1,0 +1,16 @@
+COMMERCIAL LICENSE AGREEMENT FOR VERIDUCT
+
+This agreement applies to commercial use of Veriduct by any individual, company, or entity intending to use Veriduct in closed-source, revenue-generating, or distributed commercial applications.
+
+- License Type: Non-exclusive, non-transferable
+- Scope: Rights to use, modify, and distribute Veriduct *only within a single named application* (e.g., “Klypt”)
+- Redistribution: No redistribution of Veriduct itself outside the named application is permitted
+- Attribution: Must include credit to original author (“Veriduct by Kellan Stiehl”) in documentation or product metadata
+- Modification Rights: Permitted internally; public forks or third-party distribution require prior approval
+
+By using Veriduct commercially without an agreement in place, you are in violation of copyright law.
+
+This licensing model is in place to prevent exploitative commercialization, not to restrict civil access to privacy tools.
+
+To obtain a valid commercial license, please contact:
+[kellanmakesthings.com]

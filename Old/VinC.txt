@@ -1,0 +1,2389 @@
+#ifndef COMMON_H
+#define COMMON_H
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdbool.h> // For true/false
+#include <stdint.h>  // For fixed-width integers like uint8_t
+
+#ifdef _WIN32
+#include <windows.h> // For Windows-specific functions like GetCurrentDirectory
+#include <direct.h>  // For _mkdir on Windows
+#define PATH_MAX 260 // Max path length on Windows
+#else
+#include <limits.h>  // For PATH_MAX on Linux/macOS
+#include <unistd.h>  // For access, unlink, rmdir
+#include <sys/stat.h> // For mkdir, stat
+#endif
+
+#include <getopt.h> // For CLI parsing
+
+// --- Configuration Constants ---
+#define CHUNK_SIZE           (1024 * 1024) // 1MB
+#define FILE_SALT_SIZE       16            // 16 bytes for file-specific salt
+#define MASTER_KEY_SIZE      32            // 32 bytes for a 256-bit key
+#define ORIGINAL_HEADER_SIZE 512           // Size of the original header to preserve
+#define SHA256_DIGEST_LENGTH 32            // 32 bytes for SHA256 hash
+#define SHA256_HEX_LEN       (SHA256_DIGEST_LENGTH * 2 + 1) // 64 hex chars + null terminator
+
+// Keymap format version (increment if keymap structure changes)
+#define KEYMAP_FORMAT_VERSION 1
+
+// --- Logging Levels ---
+typedef enum {
+    LOG_LEVEL_NONE,
+    LOG_LEVEL_ERROR,
+    LOG_LEVEL_WARNING,
+    LOG_LEVEL_INFO,
+    LOG_LEVEL_DEBUG
+} LogLevel;
+
+extern LogLevel VERBOSITY_LEVEL;
+
+// --- Disguise Formats ---
+typedef enum {
+    DISGUISE_NONE = 0,
+    DISGUISE_CSV,
+    DISGUISE_LOG,
+    DISGUISE_CONF
+} DisguiseFormat;
+
+// Function declarations for logging
+void log_message(LogLevel level, const char *file, int line, const char *fmt, ...);
+
+#define LOG_ERROR(fmt, ...) log_message(LOG_LEVEL_ERROR, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_WARNING(fmt, ...) log_message(LOG_LEVEL_WARNING, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_INFO(fmt, ...) log_message(LOG_LEVEL_INFO, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_DEBUG(fmt, ...) \
+    do { if (VERBOSITY_LEVEL >= LOG_LEVEL_DEBUG) log_message(LOG_LEVEL_DEBUG, __FILE__, __LINE__, fmt, ##__VA_ARGS__); } while (0)
+
+const char* disguise_format_to_string(DisguiseFormat format);
+DisguiseFormat string_to_disguise_format(const char* str);
+
+
+#endif // COMMON_H
+#include "common.h"
+#include <stdarg.h>
+#include <time.h> // For time/date in logs
+
+LogLevel VERBOSITY_LEVEL = LOG_LEVEL_INFO;
+
+void log_message(LogLevel level, const char *file, int line, const char *fmt, ...) {
+    if (level > VERBOSITY_LEVEL) {
+        return;
+    }
+
+    FILE *output = stdout;
+    const char *level_str;
+
+    switch (level) {
+        case LOG_LEVEL_ERROR:   level_str = "ERROR"; output = stderr; break;
+        case LOG_LEVEL_WARNING: level_str = "WARN "; output = stderr; break;
+        case LOG_LEVEL_INFO:    level_str = "INFO "; break;
+        case LOG_LEVEL_DEBUG:   level_str = "DEBUG"; break;
+        case LOG_LEVEL_NONE:    return; // Should not be called with NONE
+    }
+
+    // Get current time
+    time_t timer;
+    char buffer[26];
+    struct tm* tm_info;
+
+    time(&timer);
+    tm_info = localtime(&timer);
+
+    strftime(buffer, 26, "%Y-%m-%d %H:%M:%S", tm_info);
+
+    fprintf(output, "[%s] %s (%s:%d): ", buffer, level_str, file, line);
+
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(output, fmt, args);
+    va_end(args);
+    fprintf(output, "\n");
+    fflush(output); // Ensure log is flushed immediately
+}
+
+
+const char* disguise_format_to_string(DisguiseFormat format) {
+    switch (format) {
+        case DISGUISE_CSV:  return "csv";
+        case DISGUISE_LOG:  return "log";
+        case DISGUISE_CONF: return "conf";
+        default:            return "none";
+    }
+}
+
+DisguiseFormat string_to_disguise_format(const char* str) {
+    if (str == NULL) return DISGUISE_NONE;
+    if (strcmp(str, "csv") == 0) return DISGUISE_CSV;
+    if (strcmp(str, "log") == 0) return DISGUISE_LOG;
+    if (strcmp(str, "conf") == 0) return DISGUISE_CONF;
+    return DISGUISE_NONE;
+}
+#ifndef VERIDUCT_CRYPTO_H
+#define VERIDUCT_CRYPTO_H
+
+#include "common.h" // For SHA256_DIGEST_LENGTH, SHA256_HEX_LEN, common logging
+#include <openssl/sha.h>
+#include <openssl/hmac.h>
+#include <openssl/rand.h>
+#include <openssl/evp.h> // For PBKDF2
+
+
+// Define an opaque struct for HMAC_CTX to hide OpenSSL internals
+typedef struct HMAC_CTX_st HMAC_CTX_struct;
+
+
+// Hashes a buffer using SHA256.
+// data: Input data buffer.
+// data_len: Length of the input data.
+// output_hash: Buffer to store the 32-byte binary SHA256 hash.
+// Returns 0 on success, -1 on failure.
+int sha256_buffer(const unsigned char *data, size_t data_len, unsigned char *output_hash);
+
+// Hashes a file using SHA256.
+// file_path: Path to the file.
+// output_hash_hex: Buffer to store the 65-byte null-terminated hex string hash.
+// Returns 0 on success, -1 on failure.
+int sha256_file(const char *file_path, char *output_hash_hex);
+
+// Converts a binary hash to its hexadecimal string representation.
+// bin_hash: 32-byte binary hash.
+// bin_len: Length of the binary hash (should be SHA256_DIGEST_LENGTH).
+// hex_hash: Buffer to store the 65-byte null-terminated hex string.
+void bin_to_hex(const unsigned char *bin_hash, size_t bin_len, char *hex_hash);
+
+// Converts a hexadecimal string to its binary representation.
+// hex_hash: Null-terminated hex string.
+// hex_len: Length of the hex string (should be SHA256_HEX_LEN - 1).
+// bin_hash: Buffer to store the binary hash.
+// Returns 0 on success, -1 on failure.
+int hex_to_bin(const char *hex_hash, size_t hex_len, unsigned char *bin_hash);
+
+// Initializes an HMAC-SHA256 context.
+// key: The HMAC key.
+// key_len: Length of the HMAC key.
+// Returns a pointer to the initialized HMAC_CTX_struct on success, NULL on failure.
+HMAC_CTX_struct* hmac_sha256_init(const unsigned char *key, size_t key_len);
+
+// Updates the HMAC-SHA256 context with new data.
+// ctx: Pointer to the HMAC_CTX_struct.
+// data: Data to process.
+// data_len: Length of the data.
+// Returns 0 on success, -1 on failure.
+int hmac_sha256_update(HMAC_CTX_struct *ctx, const unsigned char *data, size_t data_len);
+
+// Finalizes the HMAC-SHA256 computation.
+// ctx: Pointer to the HMAC_CTX_struct.
+// output_mac: Buffer to store the 32-byte binary MAC.
+// Returns 0 on success, -1 on failure.
+int hmac_sha256_final(HMAC_CTX_struct *ctx, unsigned char *output_mac);
+
+// Cleans up and frees the HMAC-SHA256 context.
+// ctx: Pointer to the HMAC_CTX_struct.
+void hmac_sha256_cleanup(HMAC_CTX_struct *ctx);
+
+// Generates cryptographically secure random bytes.
+// buffer: Buffer to fill with random bytes.
+// num_bytes: Number of random bytes to generate.
+// Returns 0 on success, -1 on failure.
+int generate_random_bytes(unsigned char *buffer, size_t num_bytes);
+
+// Derives a key using PBKDF2 with SHA256.
+// password: The password to derive the key from.
+// password_len: Length of the password.
+// salt: The salt to use.
+// salt_len: Length of the salt.
+// iterations: Number of iterations.
+// output_key: Buffer to store the derived key.
+// output_key_len: Desired length of the derived key.
+// Returns 0 on success, -1 on failure.
+int pbkdf2_sha256(const char *password, int password_len,
+                  const unsigned char *salt, int salt_len,
+                  int iterations,
+                  unsigned char *output_key, int output_key_len);
+
+#endif // VERIDUCT_CRYPTO_H
+#include "veriduct_crypto.h"
+#include <string.h> // For memcpy, strlen
+#include <stdio.h>  // For snprintf, fopen, fclose, fread
+
+// Define the actual HMAC_CTX_st struct
+// This must match the internal structure used by OpenSSL, which is opaque
+// but we define it here for completeness within this file.
+// IMPORTANT: In a real scenario, you'd *not* define this struct if OpenSSL
+// didn't expose it. We use the public API (HMAC_CTX_new, HMAC_CTX_free etc.)
+// which handles the internal structure. The typedef in .h is sufficient.
+// The actual struct definition might vary between OpenSSL versions, so
+// relying on HMAC_CTX_new/free is safer.
+// For the purpose of this example, we'll use a placeholder if needed,
+// but the functions will correctly use OpenSSL's API.
+
+// We don't need to define HMAC_CTX_st here if we use the HMAC_CTX_new/free functions
+// which are part of OpenSSL's public API. The typedef in the header is enough
+// to declare an opaque pointer.
+
+int sha256_buffer(const unsigned char *data, size_t data_len, unsigned char *output_hash) {
+    if (!data || !output_hash) {
+        LOG_ERROR("Invalid input for sha256_buffer: data or output_hash is NULL.");
+        return -1;
+    }
+    if (SHA256(data, data_len, output_hash) != output_hash) {
+        LOG_ERROR("SHA256 buffer hashing failed.");
+        return -1;
+    }
+    return 0;
+}
+
+int sha256_file(const char *file_path, char *output_hash_hex) {
+    if (!file_path || !output_hash_hex) {
+        LOG_ERROR("Invalid input for sha256_file: file_path or output_hash_hex is NULL.");
+        return -1;
+    }
+
+    FILE *fp = fopen(file_path, "rb");
+    if (!fp) {
+        LOG_ERROR("Failed to open file '%s' for SHA256 hashing.", file_path);
+        return -1;
+    }
+
+    SHA256_CTX sha256_ctx;
+    SHA256_Init(&sha256_ctx);
+
+    unsigned char buffer[4096];
+    size_t bytes_read;
+    while ((bytes_read = fread(buffer, 1, sizeof(buffer), fp)) > 0) {
+        SHA256_Update(&sha256_ctx, buffer, bytes_read);
+    }
+
+    fclose(fp);
+
+    if (ferror(fp)) {
+        LOG_ERROR("Error reading file '%s' during SHA256 hashing.", file_path);
+        return -1;
+    }
+
+    unsigned char hash_bin[SHA256_DIGEST_LENGTH];
+    SHA256_Final(hash_bin, &sha256_ctx);
+
+    bin_to_hex(hash_bin, SHA256_DIGEST_LENGTH, output_hash_hex);
+
+    return 0;
+}
+
+void bin_to_hex(const unsigned char *bin_hash, size_t bin_len, char *hex_hash) {
+    if (!bin_hash || !hex_hash) {
+        LOG_ERROR("Invalid input for bin_to_hex: bin_hash or hex_hash is NULL.");
+        return;
+    }
+    for (size_t i = 0; i < bin_len; i++) {
+        sprintf(hex_hash + (i * 2), "%02x", bin_hash[i]);
+    }
+    hex_hash[bin_len * 2] = '\0';
+}
+
+// Helper to convert a single hex char to its integer value
+static int hex_char_to_int(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1; // Invalid hex character
+}
+
+int hex_to_bin(const char *hex_hash, size_t hex_len, unsigned char *bin_hash) {
+    if (!hex_hash || !bin_hash || hex_len % 2 != 0) {
+        LOG_ERROR("Invalid input for hex_to_bin: hex_hash is NULL, bin_hash is NULL, or hex_len is odd.");
+        return -1;
+    }
+
+    for (size_t i = 0; i < hex_len / 2; i++) {
+        int high_nibble = hex_char_to_int(hex_hash[i * 2]);
+        int low_nibble = hex_char_to_int(hex_hash[i * 2 + 1]);
+
+        if (high_nibble == -1 || low_nibble == -1) {
+            LOG_ERROR("Invalid hex character encountered in hex_to_bin: %c%c at index %zu", hex_hash[i*2], hex_hash[i*2+1], i*2);
+            return -1;
+        }
+        bin_hash[i] = (unsigned char)((high_nibble << 4) | low_nibble);
+    }
+    return 0;
+}
+
+// Wrapper for HMAC_CTX to match opaque type
+HMAC_CTX_struct* hmac_sha256_init(const unsigned char *key, size_t key_len) {
+    HMAC_CTX *ctx = HMAC_CTX_new();
+    if (!ctx) {
+        LOG_ERROR("HMAC_CTX_new failed.");
+        return NULL;
+    }
+    if (HMAC_Init_ex(ctx, key, key_len, EVP_sha256(), NULL) != 1) {
+        LOG_ERROR("HMAC_Init_ex failed.");
+        HMAC_CTX_free(ctx);
+        return NULL;
+    }
+    return (HMAC_CTX_struct*)ctx;
+}
+
+int hmac_sha256_update(HMAC_CTX_struct *ctx, const unsigned char *data, size_t data_len) {
+    if (!ctx || !data) {
+        LOG_ERROR("Invalid input for hmac_sha256_update.");
+        return -1;
+    }
+    if (HMAC_Update((HMAC_CTX*)ctx, data, data_len) != 1) {
+        LOG_ERROR("HMAC_Update failed.");
+        return -1;
+    }
+    return 0;
+}
+
+int hmac_sha256_final(HMAC_CTX_struct *ctx, unsigned char *output_mac) {
+    if (!ctx || !output_mac) {
+        LOG_ERROR("Invalid input for hmac_sha256_final.");
+        return -1;
+    }
+    unsigned int len = SHA256_DIGEST_LENGTH; // Explicitly set expected length
+    if (HMAC_Final((HMAC_CTX*)ctx, output_mac, &len) != 1) {
+        LOG_ERROR("HMAC_Final failed.");
+        return -1;
+    }
+    return 0;
+}
+
+void hmac_sha256_cleanup(HMAC_CTX_struct *ctx) {
+    if (ctx) {
+        HMAC_CTX_free((HMAC_CTX*)ctx);
+    }
+}
+
+int generate_random_bytes(unsigned char *buffer, size_t num_bytes) {
+    if (!buffer) {
+        LOG_ERROR("Invalid buffer for random byte generation.");
+        return -1;
+    }
+    if (RAND_bytes(buffer, num_bytes) != 1) {
+        LOG_ERROR("Failed to generate cryptographically secure random bytes.");
+        // ERR_print_errors_fp(stderr); // Uncomment for OpenSSL error details
+        return -1;
+    }
+    return 0;
+}
+
+int pbkdf2_sha256(const char *password, int password_len,
+                  const unsigned char *salt, int salt_len,
+                  int iterations,
+                  unsigned char *output_key, int output_key_len) {
+    if (!password || !salt || !output_key || password_len <= 0 || salt_len <= 0 || iterations <= 0 || output_key_len <= 0) {
+        LOG_ERROR("Invalid arguments for pbkdf2_sha256.");
+        return -1;
+    }
+
+    if (PKCS5_PBKDF2_HMAC(password, password_len,
+                          salt, salt_len, iterations,
+                          EVP_sha256(),
+                          output_key_len, output_key) != 1) {
+        LOG_ERROR("PKCS5_PBKDF2_HMAC failed.");
+        // ERR_print_errors_fp(stderr); // Uncomment for OpenSSL error details
+        return -1;
+    }
+    return 0;
+}
+#ifndef VERIDUCT_UTILS_H
+#define VERIDUCT_UTILS_H
+
+#include "common.h" // For common logging, types
+
+// Base64 encode a buffer.
+// input: The input data to encode.
+// input_len: The length of the input data.
+// output: A pointer to a newly allocated buffer containing the base64 string.
+//         This buffer must be freed by the caller.
+// output_len: Pointer to store the length of the output string (excluding null terminator).
+// Returns 0 on success, -1 on failure.
+int base64_encode(const unsigned char *input, size_t input_len, char **output, size_t *output_len);
+
+// Base64 decode a string.
+// input: The base64 string to decode.
+// input_len: The length of the input string.
+// output: A pointer to a newly allocated buffer containing the decoded data.
+//         This buffer must be freed by the caller.
+// output_len: Pointer to store the length of the output data.
+// Returns 0 on success, -1 on failure.
+int base64_decode(const char *input, size_t input_len, unsigned char **output, size_t *output_len);
+
+// Extracts the relative path of a file from a full path.
+// For example, "/path/to/my/file.txt" -> "my/file.txt"
+// This function allocates memory for the relative path, which must be freed by the caller.
+// Returns a dynamically allocated string on success, NULL on failure.
+char* get_relative_path(const char *full_path);
+
+
+// Ensures that all directories in a given path exist.
+// path: The directory path (e.g., "my_dir/subdir/").
+// Returns 0 on success, -1 on failure.
+int ensure_dirs(const char *path);
+
+
+#endif // VERIDUCT_UTILS_H
+#include "veriduct_utils.h"
+#include <string.h> // For strlen, strcpy, strcat, memcmp
+#include <libgen.h> // For dirname, basename (GNU specific, but widely available)
+
+#ifdef _WIN32
+#include <direct.h> // For _mkdir
+#else
+#include <sys/stat.h> // For mkdir
+#include <errno.h>    // For errno
+#endif
+
+
+// Base64 character set
+static const char *BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+int base64_encode(const unsigned char *input, size_t input_len, char **output, size_t *output_len) {
+    if (!input || !output || !output_len) {
+        LOG_ERROR("Invalid input for base64_encode.");
+        return -1;
+    }
+
+    size_t encoded_len = 4 * ((input_len + 2) / 3);
+    *output = (char *)malloc(encoded_len + 1); // +1 for null terminator
+    if (!*output) {
+        LOG_ERROR("Failed to allocate memory for base64 encoded output.");
+        return -1;
+    }
+
+    size_t i, j;
+    for (i = 0, j = 0; i < input_len;) {
+        uint32_t octet_a = i < input_len ? (unsigned char)input[i++] : 0;
+        uint32_t octet_b = i < input_len ? (unsigned char)input[i++] : 0;
+        uint32_t octet_c = i < input_len ? (unsigned char)input[i++] : 0;
+
+        uint32_t triple = (octet_a << 0x10) + (octet_b << 0x08) + octet_c;
+
+        (*output)[j++] = BASE64_CHARS[(triple >> 3 * 6) & 0x3F];
+        (*output)[j++] = BASE64_CHARS[(triple >> 2 * 6) & 0x3F];
+        (*output)[j++] = BASE64_CHARS[(triple >> 1 * 6) & 0x3F];
+        (*output)[j++] = BASE64_CHARS[(triple >> 0 * 6) & 0x3F];
+    }
+
+    // Add padding if necessary
+    if (input_len % 3 == 1) {
+        (*output)[j - 1] = '=';
+        (*output)[j - 2] = '=';
+    } else if (input_len % 3 == 2) {
+        (*output)[j - 1] = '=';
+    }
+
+    (*output)[j] = '\0';
+    *output_len = j;
+    return 0;
+}
+
+// Helper to get the value of a base64 character
+static int base64_char_to_val(char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    if (c == '=') return 0; // Padding character
+    return -1; // Invalid Base64 character
+}
+
+int base64_decode(const char *input, size_t input_len, unsigned char **output, size_t *output_len) {
+    if (!input || !output || !output_len) {
+        LOG_ERROR("Invalid input for base64_decode.");
+        return -1;
+    }
+
+    if (input_len == 0 || input_len % 4 != 0) {
+        LOG_ERROR("Invalid base64 input length.");
+        return -1;
+    }
+
+    size_t decoded_len = (input_len / 4) * 3;
+    if (input[input_len - 1] == '=') decoded_len--;
+    if (input[input_len - 2] == '=') decoded_len--;
+
+    *output = (unsigned char *)malloc(decoded_len + 1); // +1 for null terminator if string
+    if (!*output) {
+        LOG_ERROR("Failed to allocate memory for base64 decoded output.");
+        return -1;
+    }
+    memset(*output, 0, decoded_len + 1); // Initialize to zeros
+
+    size_t i, j;
+    for (i = 0, j = 0; i < input_len;) {
+        uint32_t sextet_a = base64_char_to_val(input[i++]);
+        uint32_t sextet_b = base64_char_to_val(input[i++]);
+        uint32_t sextet_c = base64_char_to_val(input[i++]);
+        uint32_t sextet_d = base64_char_to_val(input[i++]);
+
+        // Check for invalid characters
+        if (sextet_a == -1 || sextet_b == -1 || sextet_c == -1 || sextet_d == -1) {
+            LOG_ERROR("Invalid Base64 character encountered during decoding.");
+            free(*output);
+            *output = NULL;
+            return -1;
+        }
+
+        uint32_t triple = (sextet_a << 3 * 6) + (sextet_b << 2 * 6) + (sextet_c << 1 * 6) + (sextet_d << 0 * 6);
+
+        if (j < decoded_len) (*output)[j++] = (triple >> 2 * 8) & 0xFF;
+        if (j < decoded_len) (*output)[j++] = (triple >> 1 * 8) & 0xFF;
+        if (j < decoded_len) (*output)[j++] = (triple >> 0 * 8) & 0xFF;
+    }
+
+    *output_len = j;
+    return 0;
+}
+
+char* get_relative_path(const char *full_path) {
+    if (!full_path) {
+        return NULL;
+    }
+
+    // In a real application, you might want to consider the current working directory
+    // or a defined "root" directory to compute the relative path.
+    // For simplicity, this assumes the "relative path" is just the basename
+    // if it's a direct file in the current directory, or includes immediate subdirectories
+    // if the full_path implies that.
+    // However, the Python `os.path.relpath` is more robust.
+    // For this C port, we'll mimic the "basename" approach if it's not starting with a leading slash,
+    // or more complex logic if it is.
+
+    // A simple approach for relative path: if it starts with current dir, remove it.
+    // If not, just return the path as is.
+    // This is a common point of confusion. The Python `relpath` function computes a path
+    // relative to a starting point (defaulting to current working directory).
+    // Let's assume for Veriduct, the stored 'filename' is meant to be relative to the point
+    // where 'veriduct' is run or its configuration.
+
+    // Given the Python equivalent often assumes the basename or a simple relative path,
+    // let's try a robust approach that gets the path relative to the current working directory.
+
+    char cwd[PATH_MAX];
+    if (getcwd(cwd, sizeof(cwd)) == NULL) {
+        LOG_ERROR("Failed to get current working directory: %s", strerror(errno));
+        return strdup(full_path); // Fallback to full path if we can't get CWD
+    }
+
+    // Ensure CWD ends with a separator for easier comparison
+    size_t cwd_len = strlen(cwd);
+    if (cwd[cwd_len - 1] != '/' && cwd[cwd_len - 1] != '\\') {
+        strcat(cwd, "/");
+        cwd_len++;
+    }
+
+    // Convert full_path to a canonical form (e.g., resolve .. and . and ensure consistent separators)
+    // This is complex for cross-platform. For now, a basic prefix check.
+    // A more complete solution might use realpath (Linux) or GetFullPathName (Windows).
+
+    // Simple prefix check:
+    if (strncmp(full_path, cwd, cwd_len) == 0) {
+        // Path starts with CWD, so it's a relative path from CWD
+        return strdup(full_path + cwd_len);
+    } else {
+        // Assume it's already a relative path or needs to be stored as is.
+        // Or if it's an absolute path that doesn't start with CWD, store it as is.
+        return strdup(full_path);
+    }
+}
+
+
+int ensure_dirs(const char *path) {
+    if (!path || strlen(path) == 0) {
+        return 0; // Empty path, nothing to do
+    }
+
+    char *path_copy = strdup(path);
+    if (!path_copy) {
+        LOG_ERROR("Failed to allocate memory for path copy.");
+        return -1;
+    }
+
+    // Use a buffer to build subdirectories
+    char tmp_path[PATH_MAX];
+    tmp_path[0] = '\0';
+
+    char *p = path_copy;
+    char *segment;
+
+#ifdef _WIN32
+    char *sep = "/\\"; // Both can be used on Windows
+#else
+    char *sep = "/";
+#endif
+
+    // Handle potential drive letters on Windows (e.g., C:/)
+#ifdef _WIN32
+    if (strlen(p) > 1 && p[1] == ':') {
+        strncpy(tmp_path, p, 2); // Copy "C:"
+        tmp_path[2] = '\0';
+        p += 2; // Move past "C:"
+        if (*p == '/' || *p == '\\') { // If it's "C:/", copy the slash
+            strcat(tmp_path, "/");
+            p++;
+        }
+    }
+#endif
+
+    segment = strtok(p, sep);
+    while (segment != NULL) {
+        // Append segment to tmp_path
+        if (strlen(tmp_path) > 0 && tmp_path[strlen(tmp_path) - 1] != '/' && tmp_path[strlen(tmp_path) - 1] != '\\') {
+            strcat(tmp_path, "/");
+        }
+        strcat(tmp_path, segment);
+
+        struct stat st;
+        if (stat(tmp_path, &st) == -1) { // Directory does not exist
+#ifdef _WIN32
+            if (_mkdir(tmp_path) == -1) {
+#else
+            if (mkdir(tmp_path, 0755) == -1) { // 0755 permissions for directory
+#endif
+                if (errno != EEXIST) { // If it failed for reasons other than already existing
+                    LOG_ERROR("Failed to create directory '%s': %s", tmp_path, strerror(errno));
+                    free(path_copy);
+                    return -1;
+                }
+            }
+        } else if (!S_ISDIR(st.st_mode)) { // Path exists but is not a directory
+            LOG_ERROR("Path '%s' exists but is not a directory.", tmp_path);
+            free(path_copy);
+            return -1;
+        }
+        segment = strtok(NULL, sep);
+    }
+
+    free(path_copy);
+    return 0;
+}
+#ifndef VERIDUCT_STORAGE_H
+#define VERIDUCT_STORAGE_H
+
+#include "common.h" // For common logging
+#include <sqlite3.h> // SQLite library
+
+// Opaque structure for ChunkStorage
+typedef struct ChunkStorage ChunkStorage;
+
+// Initializes the chunk storage database.
+// db_path: Path to the SQLite database file.
+// Returns a pointer to an initialized ChunkStorage object on success, NULL on failure.
+ChunkStorage* chunk_storage_init(const char *db_path);
+
+// Closes the chunk storage database.
+// storage: Pointer to the ChunkStorage object.
+void chunk_storage_close(ChunkStorage *storage);
+
+// Adds a chunk to the database.
+// storage: Pointer to the ChunkStorage object.
+// chunk_hash_hex: Hex string representation of the chunk's SHA256 hash (primary key).
+// chunk_data: Pointer to the raw chunk data.
+// chunk_len: Length of the chunk data.
+// Returns 0 on success, -1 on failure.
+int chunk_storage_add_chunk(ChunkStorage *storage, const char *chunk_hash_hex,
+                            const unsigned char *chunk_data, size_t chunk_len);
+
+// Retrieves a chunk from the database.
+// storage: Pointer to the ChunkStorage object.
+// chunk_hash_hex: Hex string representation of the chunk's SHA256 hash.
+// output_data: Pointer to a pointer that will be allocated and filled with the chunk data.
+//              This memory must be freed by the caller using free().
+// output_len: Pointer to store the length of the retrieved chunk data.
+// Returns 0 on success, -1 on failure (e.g., chunk not found).
+int chunk_storage_get_chunk(ChunkStorage *storage, const char *chunk_hash_hex,
+                            unsigned char **output_data, size_t *output_len);
+
+// Checks if a chunk exists in the database.
+// storage: Pointer to the ChunkStorage object.
+// chunk_hash_hex: Hex string representation of the chunk's SHA256 hash.
+// Returns 1 if chunk exists, 0 if not, -1 on error.
+int chunk_storage_chunk_exists(ChunkStorage *storage, const char *chunk_hash_hex);
+
+#endif // VERIDUCT_STORAGE_H
+#include "veriduct_storage.h"
+#include "veriduct_crypto.h" // For hex_to_bin (though not directly used in latest version, good for context)
+#include <sqlite3.h>
+#include <string.h>
+
+// Internal structure for ChunkStorage
+struct ChunkStorage {
+    sqlite3 *db;
+    sqlite3_stmt *stmt_insert_chunk;
+    sqlite3_stmt *stmt_get_chunk;
+    sqlite3_stmt *stmt_chunk_exists;
+};
+
+// SQL statements
+static const char *CREATE_TABLE_SQL =
+    "CREATE TABLE IF NOT EXISTS chunks ("
+    "  hash TEXT PRIMARY KEY NOT NULL,"
+    "  data BLOB NOT NULL"
+    ");";
+
+static const char *INSERT_CHUNK_SQL =
+    "INSERT OR IGNORE INTO chunks (hash, data) VALUES (?, ?);"; // IGNORE prevents error on duplicate hash
+
+static const char *GET_CHUNK_SQL =
+    "SELECT data FROM chunks WHERE hash = ?;";
+
+static const char *CHUNK_EXISTS_SQL =
+    "SELECT 1 FROM chunks WHERE hash = ?;";
+
+
+// Helper function for error logging
+static void log_sqlite_error(sqlite3 *db, const char *message) {
+    LOG_ERROR("%s: %s", message, sqlite3_errmsg(db));
+}
+
+ChunkStorage* chunk_storage_init(const char *db_path) {
+    ChunkStorage *storage = (ChunkStorage*)malloc(sizeof(ChunkStorage));
+    if (!storage) {
+        LOG_ERROR("Failed to allocate ChunkStorage.");
+        return NULL;
+    }
+    memset(storage, 0, sizeof(ChunkStorage)); // Initialize to zeros
+
+    int rc = sqlite3_open(db_path, &storage->db);
+    if (rc != SQLITE_OK) {
+        log_sqlite_error(storage->db, "Failed to open SQLite database");
+        chunk_storage_close(storage); // Clean up partially created storage
+        return NULL;
+    }
+
+    // Create chunks table
+    rc = sqlite3_exec(storage->db, CREATE_TABLE_SQL, 0, 0, 0);
+    if (rc != SQLITE_OK) {
+        log_sqlite_error(storage->db, "Failed to create chunks table");
+        chunk_storage_close(storage);
+        return NULL;
+    }
+
+    // Prepare statements for reusability
+    rc = sqlite3_prepare_v2(storage->db, INSERT_CHUNK_SQL, -1, &storage->stmt_insert_chunk, NULL);
+    if (rc != SQLITE_OK) {
+        log_sqlite_error(storage->db, "Failed to prepare insert statement");
+        chunk_storage_close(storage);
+        return NULL;
+    }
+
+    rc = sqlite3_prepare_v2(storage->db, GET_CHUNK_SQL, -1, &storage->stmt_get_chunk, NULL);
+    if (rc != SQLITE_OK) {
+        log_sqlite_error(storage->db, "Failed to prepare get statement");
+        chunk_storage_close(storage);
+        return NULL;
+    }
+
+    rc = sqlite3_prepare_v2(storage->db, CHUNK_EXISTS_SQL, -1, &storage->stmt_chunk_exists, NULL);
+    if (rc != SQLITE_OK) {
+        log_sqlite_error(storage->db, "Failed to prepare exists statement");
+        chunk_storage_close(storage);
+        return NULL;
+    }
+
+    LOG_INFO("Chunk storage initialized at '%s'.", db_path);
+    return storage;
+}
+
+void chunk_storage_close(ChunkStorage *storage) {
+    if (storage) {
+        if (storage->stmt_insert_chunk) sqlite3_finalize(storage->stmt_insert_chunk);
+        if (storage->stmt_get_chunk) sqlite3_finalize(storage->stmt_get_chunk);
+        if (storage->stmt_chunk_exists) sqlite3_finalize(storage->stmt_chunk_exists);
+        if (storage->db) {
+            int rc = sqlite3_close(storage->db);
+            if (rc != SQLITE_OK) {
+                LOG_ERROR("Failed to close SQLite database: %s", sqlite3_errmsg(storage->db));
+            } else {
+                LOG_INFO("Chunk storage database closed.");
+            }
+        }
+        free(storage);
+    }
+}
+
+int chunk_storage_add_chunk(ChunkStorage *storage, const char *chunk_hash_hex,
+                            const unsigned char *chunk_data, size_t chunk_len) {
+    if (!storage || !chunk_hash_hex || !chunk_data || chunk_len == 0) {
+        LOG_ERROR("Invalid input for chunk_storage_add_chunk.");
+        return -1;
+    }
+
+    // Reset and bind parameters
+    sqlite3_reset(storage->stmt_insert_chunk);
+    sqlite3_clear_bindings(storage->stmt_insert_chunk);
+
+    int rc = sqlite3_bind_text(storage->stmt_insert_chunk, 1, chunk_hash_hex, -1, SQLITE_STATIC);
+    if (rc != SQLITE_OK) {
+        log_sqlite_error(storage->db, "Failed to bind hash parameter for insert");
+        return -1;
+    }
+
+    rc = sqlite3_bind_blob(storage->stmt_insert_chunk, 2, chunk_data, chunk_len, SQLITE_STATIC);
+    if (rc != SQLITE_OK) {
+        log_sqlite_error(storage->db, "Failed to bind data parameter for insert");
+        return -1;
+    }
+
+    rc = sqlite3_step(storage->stmt_insert_chunk);
+    if (rc != SQLITE_DONE) {
+        if (rc == SQLITE_CONSTRAINT) {
+            LOG_DEBUG("Chunk '%s' already exists in DB, ignoring.", chunk_hash_hex);
+            return 0; // Not an error, just already there
+        }
+        log_sqlite_error(storage->db, "Failed to execute insert statement");
+        return -1;
+    }
+
+    return 0;
+}
+
+int chunk_storage_get_chunk(ChunkStorage *storage, const char *chunk_hash_hex,
+                            unsigned char **output_data, size_t *output_len) {
+    if (!storage || !chunk_hash_hex || !output_data || !output_len) {
+        LOG_ERROR("Invalid input for chunk_storage_get_chunk.");
+        return -1;
+    }
+
+    // Reset and bind parameters
+    sqlite3_reset(storage->stmt_get_chunk);
+    sqlite3_clear_bindings(storage->stmt_get_chunk);
+
+    int rc = sqlite3_bind_text(storage->stmt_get_chunk, 1, chunk_hash_hex, -1, SQLITE_STATIC);
+    if (rc != SQLITE_OK) {
+        log_sqlite_error(storage->db, "Failed to bind hash parameter for get");
+        return -1;
+    }
+
+    rc = sqlite3_step(storage->stmt_get_chunk);
+    if (rc == SQLITE_ROW) {
+        const void *blob_data = sqlite3_column_blob(storage->stmt_get_chunk, 0);
+        int blob_len = sqlite3_column_bytes(storage->stmt_get_chunk, 0);
+
+        *output_data = (unsigned char*)malloc(blob_len);
+        if (!*output_data) {
+            LOG_ERROR("Failed to allocate memory for retrieved chunk data.");
+            return -1;
+        }
+        memcpy(*output_data, blob_data, blob_len);
+        *output_len = blob_len;
+        return 0;
+    } else if (rc == SQLITE_DONE) {
+        LOG_WARNING("Chunk '%s' not found in database.", chunk_hash_hex);
+        *output_data = NULL;
+        *output_len = 0;
+        return -1; // Chunk not found
+    } else {
+        log_sqlite_error(storage->db, "Failed to execute get statement");
+        return -1;
+    }
+}
+
+int chunk_storage_chunk_exists(ChunkStorage *storage, const char *chunk_hash_hex) {
+    if (!storage || !chunk_hash_hex) {
+        LOG_ERROR("Invalid input for chunk_storage_chunk_exists.");
+        return -1;
+    }
+
+    sqlite3_reset(storage->stmt_chunk_exists);
+    sqlite3_clear_bindings(storage->stmt_chunk_exists);
+
+    int rc = sqlite3_bind_text(storage->stmt_chunk_exists, 1, chunk_hash_hex, -1, SQLITE_STATIC);
+    if (rc != SQLITE_OK) {
+        log_sqlite_error(storage->db, "Failed to bind hash parameter for exists check");
+        return -1;
+    }
+
+    rc = sqlite3_step(storage->stmt_chunk_exists);
+    if (rc == SQLITE_ROW) {
+        return 1; // Chunk exists
+    } else if (rc == SQLITE_DONE) {
+        return 0; // Chunk does not exist
+    } else {
+        log_sqlite_error(storage->db, "Failed to execute exists statement");
+        return -1;
+    }
+}
+#ifndef VERIDUCT_KEYMAP_H
+#define VERIDUCT_KEYMAP_H
+
+#include "common.h" // For common types, logging, constants
+#include "cJSON.h"  // For JSON handling
+
+// --- FileMetadata Structure ---
+typedef struct {
+    char *filename;             // Original relative path of the file
+    unsigned char *file_salt;   // Salt used for USF calculation
+    size_t file_salt_len;
+    char usf_hash[SHA256_HEX_LEN]; // Unique Semantic Fingerprint (hash of first chunk + salt)
+    char mac[SHA256_HEX_LEN];   // HMAC of the entire original file content
+    unsigned char *original_header; // First ORIGINAL_HEADER_SIZE bytes of the original file
+    size_t original_header_len;
+    char **chunk_hashes;        // Array of hex hashes for each chunk
+    size_t num_chunk_hashes;
+} FileMetadata;
+
+
+// --- KeyMap Structure ---
+typedef struct {
+    FileMetadata **files;       // Array of FileMetadata pointers
+    size_t num_files;
+} KeyMap;
+
+
+// Creates a new FileMetadata object.
+// filename: Original relative path of the file.
+// file_salt: Binary salt. Copied internally.
+// file_salt_len: Length of the salt.
+// usf_hash: Hex string USF hash. Copied internally.
+// mac: Hex string MAC. Copied internally.
+// original_header: Binary header data. Copied internally. Can be NULL.
+// original_header_len: Length of the header.
+// chunk_hashes: Array of hex strings of chunk hashes. Copied internally. Can be NULL.
+// num_chunk_hashes: Number of chunk hashes.
+// Returns a pointer to a new FileMetadata object on success, NULL on failure.
+FileMetadata* file_metadata_create(const char *filename,
+                                   const unsigned char *file_salt, size_t file_salt_len,
+                                   const char *usf_hash, const char *mac,
+                                   const unsigned char *original_header, size_t original_header_len,
+                                   char **chunk_hashes, size_t num_chunk_hashes);
+
+// Frees memory associated with a FileMetadata object.
+void file_metadata_free(FileMetadata *fm);
+
+
+// Creates a new empty KeyMap object.
+// Returns a pointer to a new KeyMap object on success, NULL on failure.
+KeyMap* key_map_create(void);
+
+// Frees memory associated with a KeyMap object and all its FileMetadata entries.
+void key_map_free(KeyMap *km);
+
+// Adds a FileMetadata object to the KeyMap.
+// key_map: Pointer to the KeyMap object.
+// fm: Pointer to the FileMetadata object to add. The KeyMap takes ownership of 'fm'.
+// Returns 0 on success, -1 on failure (e.g., if filename already exists).
+int key_map_add_file(KeyMap *key_map, FileMetadata *fm);
+
+// Retrieves a FileMetadata object from the KeyMap by filename.
+// key_map: Pointer to the KeyMap object.
+// filename: The filename (original relative path) to search for.
+// Returns a pointer to the FileMetadata object on success, NULL if not found.
+// The returned pointer is owned by the KeyMap; do NOT free it.
+FileMetadata* key_map_get_file_metadata(const KeyMap *key_map, const char *filename);
+
+// Converts a FileMetadata object to a cJSON object.
+// fm: Pointer to the FileMetadata object.
+// Returns a pointer to a cJSON object on success, NULL on failure.
+cJSON* file_metadata_to_json(const FileMetadata *fm);
+
+// Converts a cJSON object to a FileMetadata object.
+// json_obj: Pointer to the cJSON object representing FileMetadata.
+// Returns a pointer to a new FileMetadata object on success, NULL on failure.
+// The returned object must be freed by the caller using file_metadata_free().
+FileMetadata* file_metadata_from_json(const cJSON *json_obj);
+
+// Converts a KeyMap object to a cJSON object.
+// km: Pointer to the KeyMap object.
+// Returns a pointer to a cJSON object on success, NULL on failure.
+cJSON* key_map_to_json(const KeyMap *km);
+
+// Converts a cJSON object to a KeyMap object.
+// json_obj: Pointer to the cJSON object representing the KeyMap.
+// Returns a pointer to a new KeyMap object on success, NULL on failure.
+// The returned object must be freed by the caller using key_map_free().
+KeyMap* key_map_from_json(const cJSON *json_obj);
+
+
+// Saves the KeyMap to a JSON file, compressed with Zstandard.
+// key_map: Pointer to the KeyMap object.
+// file_path: Path to the output .zst file.
+// Returns 0 on success, -1 on failure.
+int key_map_save_json_zst(const KeyMap *key_map, const char *file_path);
+
+// Loads a KeyMap from a Zstandard compressed JSON file.
+// file_path: Path to the input .zst file.
+// Returns a pointer to a new KeyMap object on success, NULL on failure.
+// The returned object must be freed by the caller using key_map_free().
+KeyMap* key_map_load_json_zst(const char *file_path);
+
+
+// Saves the KeyMap in a disguised format.
+// key_map: The KeyMap object to save.
+// output_dir: The directory where the disguised file will be created.
+// format: The DisguiseFormat (CSV, LOG, CONF).
+// Returns 0 on success, -1 on failure.
+int disguise_key_save(const KeyMap *key_map, const char *output_dir, DisguiseFormat format);
+
+// Loads a KeyMap from a disguised file.
+// file_path: The path to the disguised file.
+// format: The DisguiseFormat (CSV, LOG, CONF) to attempt decoding with.
+// Returns a pointer to a new KeyMap object on success, NULL on failure.
+KeyMap* decode_disguised_key_load(const char *file_path, DisguiseFormat format);
+
+#endif // VERIDUCT_KEYMAP_H
+#include "veriduct_keymap.h"
+#include "veriduct_crypto.h" // For bin_to_hex, hex_to_bin
+#include "veriduct_utils.h"  // For base64_encode/decode, ensure_dirs
+#include <zstd.h>            // For Zstandard compression/decompression
+#include <string.h>          // For strcmp, strdup, memcpy, memset
+#include <sys/stat.h>        // For stat (to get file size)
+#include <stdio.h>           // For fopen, fclose, fwrite, fread
+
+// --- FileMetadata functions ---
+
+FileMetadata* file_metadata_create(const char *filename,
+                                   const unsigned char *file_salt, size_t file_salt_len,
+                                   const char *usf_hash, const char *mac,
+                                   const unsigned char *original_header, size_t original_header_len,
+                                   char **chunk_hashes, size_t num_chunk_hashes) {
+    FileMetadata *fm = (FileMetadata*)malloc(sizeof(FileMetadata));
+    if (!fm) {
+        LOG_ERROR("Failed to allocate FileMetadata.");
+        return NULL;
+    }
+    memset(fm, 0, sizeof(FileMetadata)); // Initialize all members to 0/NULL
+
+    fm->filename = strdup(filename);
+    if (!fm->filename) { goto fail; }
+
+    if (file_salt && file_salt_len > 0) {
+        fm->file_salt = (unsigned char*)malloc(file_salt_len);
+        if (!fm->file_salt) { goto fail; }
+        memcpy(fm->file_salt, file_salt, file_salt_len);
+        fm->file_salt_len = file_salt_len;
+    }
+
+    if (usf_hash) { strncpy(fm->usf_hash, usf_hash, SHA256_HEX_LEN - 1); fm->usf_hash[SHA256_HEX_LEN-1] = '\0'; }
+    if (mac) { strncpy(fm->mac, mac, SHA256_HEX_LEN - 1); fm->mac[SHA256_HEX_LEN-1] = '\0'; }
+
+    if (original_header && original_header_len > 0) {
+        fm->original_header = (unsigned char*)malloc(original_header_len);
+        if (!fm->original_header) { goto fail; }
+        memcpy(fm->original_header, original_header, original_header_len);
+        fm->original_header_len = original_header_len;
+    }
+
+    if (chunk_hashes && num_chunk_hashes > 0) {
+        fm->chunk_hashes = (char**)malloc(sizeof(char*) * num_chunk_hashes);
+        if (!fm->chunk_hashes) { goto fail; }
+        for (size_t i = 0; i < num_chunk_hashes; ++i) {
+            fm->chunk_hashes[i] = strdup(chunk_hashes[i]);
+            if (!fm->chunk_hashes[i]) {
+                // Free already allocated chunk hashes before failing
+                for (size_t j = 0; j < i; ++j) free(fm->chunk_hashes[j]);
+                goto fail;
+            }
+        }
+        fm->num_chunk_hashes = num_chunk_hashes;
+    }
+
+    return fm;
+
+fail:
+    file_metadata_free(fm); // Free any partially allocated memory
+    LOG_ERROR("Failed to create FileMetadata object.");
+    return NULL;
+}
+
+void file_metadata_free(FileMetadata *fm) {
+    if (fm) {
+        free(fm->filename);
+        free(fm->file_salt);
+        free(fm->original_header);
+        if (fm->chunk_hashes) {
+            for (size_t i = 0; i < fm->num_chunk_hashes; ++i) {
+                free(fm->chunk_hashes[i]);
+            }
+            free(fm->chunk_hashes);
+        }
+        free(fm);
+    }
+}
+
+
+// --- KeyMap functions ---
+
+KeyMap* key_map_create(void) {
+    KeyMap *km = (KeyMap*)malloc(sizeof(KeyMap));
+    if (!km) {
+        LOG_ERROR("Failed to allocate KeyMap.");
+        return NULL;
+    }
+    km->files = NULL;
+    km->num_files = 0;
+    return km;
+}
+
+void key_map_free(KeyMap *km) {
+    if (km) {
+        if (km->files) {
+            for (size_t i = 0; i < km->num_files; ++i) {
+                file_metadata_free(km->files[i]);
+            }
+            free(km->files);
+        }
+        free(km);
+    }
+}
+
+int key_map_add_file(KeyMap *key_map, FileMetadata *fm) {
+    if (!key_map || !fm) {
+        LOG_ERROR("Invalid input to key_map_add_file.");
+        return -1;
+    }
+
+    // Check if file already exists
+    for (size_t i = 0; i < key_map->num_files; ++i) {
+        if (strcmp(key_map->files[i]->filename, fm->filename) == 0) {
+            LOG_WARNING("File '%s' already exists in keymap. Not adding again.", fm->filename);
+            // Optionally, update the existing entry instead of ignoring
+            // For now, we'll just report success if it's already there
+            file_metadata_free(fm); // Free the new FM since we're not adding it
+            return 0;
+        }
+    }
+
+    FileMetadata **new_files = (FileMetadata**)realloc(key_map->files, sizeof(FileMetadata*) * (key_map->num_files + 1));
+    if (!new_files) {
+        LOG_ERROR("Failed to reallocate files array for KeyMap.");
+        file_metadata_free(fm); // Free the FM passed in since we can't add it
+        return -1;
+    }
+    key_map->files = new_files;
+    key_map->files[key_map->num_files] = fm;
+    key_map->num_files++;
+    return 0;
+}
+
+FileMetadata* key_map_get_file_metadata(const KeyMap *key_map, const char *filename) {
+    if (!key_map || !filename) {
+        LOG_ERROR("Invalid input to key_map_get_file_metadata.");
+        return NULL;
+    }
+    for (size_t i = 0; i < key_map->num_files; ++i) {
+        if (strcmp(key_map->files[i]->filename, filename) == 0) {
+            return key_map->files[i];
+        }
+    }
+    return NULL; // Not found
+}
+
+
+// --- JSON Serialization/Deserialization ---
+
+cJSON* file_metadata_to_json(const FileMetadata *fm) {
+    if (!fm) { return NULL; }
+
+    cJSON *json_fm = cJSON_CreateObject();
+    if (!json_fm) { return NULL; }
+
+    cJSON_AddStringToObject(json_fm, "filename", fm->filename);
+    cJSON_AddStringToObject(json_fm, "usf_hash", fm->usf_hash);
+    cJSON_AddStringToObject(json_fm, "mac", fm->mac);
+
+    // Encode binary data to Base64
+    char *salt_b64 = NULL;
+    size_t salt_b64_len = 0;
+    if (fm->file_salt && fm->file_salt_len > 0) {
+        if (base64_encode(fm->file_salt, fm->file_salt_len, &salt_b64, &salt_b64_len) != 0) {
+            LOG_ERROR("Failed to base64 encode file_salt.");
+            cJSON_Delete(json_fm); return NULL;
+        }
+        cJSON_AddStringToObject(json_fm, "file_salt", salt_b64);
+        free(salt_b64);
+    } else {
+        cJSON_AddStringToObject(json_fm, "file_salt", ""); // Store as empty string if no salt
+    }
+
+    char *header_b64 = NULL;
+    size_t header_b64_len = 0;
+    if (fm->original_header && fm->original_header_len > 0) {
+        if (base64_encode(fm->original_header, fm->original_header_len, &header_b64, &header_b64_len) != 0) {
+            LOG_ERROR("Failed to base64 encode original_header.");
+            cJSON_Delete(json_fm); return NULL;
+        }
+        cJSON_AddStringToObject(json_fm, "original_header", header_b64);
+        free(header_b64);
+    } else {
+        cJSON_AddStringToObject(json_fm, "original_header", ""); // Store as empty string if no header
+    }
+
+
+    cJSON *json_chunk_hashes = cJSON_CreateArray();
+    if (!json_chunk_hashes) { cJSON_Delete(json_fm); return NULL; }
+
+    for (size_t i = 0; i < fm->num_chunk_hashes; ++i) {
+        cJSON_AddItemToArray(json_chunk_hashes, cJSON_CreateString(fm->chunk_hashes[i]));
+    }
+    cJSON_AddItemToObject(json_fm, "chunk_hashes", json_chunk_hashes);
+
+    return json_fm;
+}
+
+FileMetadata* file_metadata_from_json(const cJSON *json_obj) {
+    if (!json_obj) { return NULL; }
+
+    cJSON *filename_json = cJSON_GetObjectItemCaseSensitive(json_obj, "filename");
+    cJSON *usf_hash_json = cJSON_GetObjectItemCaseSensitive(json_obj, "usf_hash");
+    cJSON *mac_json = cJSON_GetObjectItemCaseSensitive(json_obj, "mac");
+    cJSON *file_salt_json = cJSON_GetObjectItemCaseSensitive(json_obj, "file_salt");
+    cJSON *original_header_json = cJSON_GetObjectItemCaseSensitive(json_obj, "original_header");
+    cJSON *chunk_hashes_json = cJSON_GetObjectItemCaseSensitive(json_obj, "chunk_hashes");
+
+    if (!cJSON_IsString(filename_json) || !cJSON_IsString(usf_hash_json) || !cJSON_IsString(mac_json) ||
+        !cJSON_IsString(file_salt_json) || !cJSON_IsString(original_header_json) || !cJSON_IsArray(chunk_hashes_json)) {
+        LOG_ERROR("Missing or invalid fields in FileMetadata JSON.");
+        return NULL;
+    }
+
+    unsigned char *file_salt = NULL;
+    size_t file_salt_len = 0;
+    if (strlen(file_salt_json->valuestring) > 0) {
+        if (base64_decode(file_salt_json->valuestring, strlen(file_salt_json->valuestring), &file_salt, &file_salt_len) != 0) {
+            LOG_ERROR("Failed to base64 decode file_salt from JSON.");
+            return NULL;
+        }
+    }
+
+    unsigned char *original_header = NULL;
+    size_t original_header_len = 0;
+    if (strlen(original_header_json->valuestring) > 0) {
+        if (base64_decode(original_header_json->valuestring, strlen(original_header_json->valuestring), &original_header, &original_header_len) != 0) {
+            LOG_ERROR("Failed to base64 decode original_header from JSON.");
+            if (file_salt) free(file_salt);
+            return NULL;
+        }
+    }
+
+    size_t num_chunk_hashes = cJSON_GetArraySize(chunk_hashes_json);
+    char **chunk_hashes = NULL;
+    if (num_chunk_hashes > 0) {
+        chunk_hashes = (char**)malloc(sizeof(char*) * num_chunk_hashes);
+        if (!chunk_hashes) {
+            LOG_ERROR("Failed to allocate memory for chunk_hashes array.");
+            if (file_salt) free(file_salt);
+            if (original_header) free(original_header);
+            return NULL;
+        }
+        for (size_t i = 0; i < num_chunk_hashes; ++i) {
+            cJSON *chunk_hash_item = cJSON_GetArrayItem(chunk_hashes_json, i);
+            if (!cJSON_IsString(chunk_hash_item)) {
+                LOG_ERROR("Invalid chunk hash item in JSON array.");
+                for (size_t j = 0; j < i; ++j) free(chunk_hashes[j]);
+                free(chunk_hashes);
+                if (file_salt) free(file_salt);
+                if (original_header) free(original_header);
+                return NULL;
+            }
+            chunk_hashes[i] = strdup(chunk_hash_item->valuestring);
+            if (!chunk_hashes[i]) {
+                LOG_ERROR("Failed to duplicate chunk hash string.");
+                for (size_t j = 0; j < i; ++j) free(chunk_hashes[j]);
+                free(chunk_hashes);
+                if (file_salt) free(file_salt);
+                if (original_header) free(original_header);
+                return NULL;
+            }
+        }
+    }
+
+    FileMetadata *fm = file_metadata_create(filename_json->valuestring,
+                                            file_salt, file_salt_len,
+                                            usf_hash_json->valuestring, mac_json->valuestring,
+                                            original_header, original_header_len,
+                                            chunk_hashes, num_chunk_hashes);
+
+    // The fm takes ownership of these, so we don't free them here if creation was successful.
+    // If creation failed, they are freed by goto fail.
+    // If successful, they are part of the fm struct.
+    if (fm == NULL) { // If file_metadata_create failed, it would have freed these.
+        if (file_salt) free(file_salt);
+        if (original_header) free(original_header);
+        if (chunk_hashes) {
+            for (size_t i = 0; i < num_chunk_hashes; ++i) free(chunk_hashes[i]);
+            free(chunk_hashes);
+        }
+    }
+
+    return fm;
+}
+
+cJSON* key_map_to_json(const KeyMap *km) {
+    if (!km) { return NULL; }
+
+    cJSON *json_keymap = cJSON_CreateObject();
+    if (!json_keymap) { return NULL; }
+
+    cJSON_AddNumberToObject(json_keymap, "format_version", KEYMAP_FORMAT_VERSION);
+
+    cJSON *json_files = cJSON_CreateArray();
+    if (!json_files) { cJSON_Delete(json_keymap); return NULL; }
+
+    for (size_t i = 0; i < km->num_files; ++i) {
+        cJSON *json_fm = file_metadata_to_json(km->files[i]);
+        if (!json_fm) {
+            LOG_ERROR("Failed to convert FileMetadata to JSON for '%s'.", km->files[i]->filename);
+            cJSON_Delete(json_keymap);
+            return NULL;
+        }
+        cJSON_AddItemToArray(json_files, json_fm);
+    }
+    cJSON_AddItemToObject(json_keymap, "files", json_files);
+
+    return json_keymap;
+}
+
+KeyMap* key_map_from_json(const cJSON *json_obj) {
+    if (!json_obj) { return NULL; }
+
+    cJSON *format_version_json = cJSON_GetObjectItemCaseSensitive(json_obj, "format_version");
+    cJSON *files_json = cJSON_GetObjectItemCaseSensitive(json_obj, "files");
+
+    if (!cJSON_IsNumber(format_version_json) || !cJSON_IsArray(files_json)) {
+        LOG_ERROR("Invalid or missing 'format_version' or 'files' in KeyMap JSON.");
+        return NULL;
+    }
+
+    if (format_version_json->valueint != KEYMAP_FORMAT_VERSION) {
+        LOG_WARNING("KeyMap format version mismatch. Expected %d, got %d. May lead to issues.",
+                    KEYMAP_FORMAT_VERSION, format_version_json->valueint);
+        // Continue, but log warning. Depending on strictness, could return NULL.
+    }
+
+    KeyMap *km = key_map_create();
+    if (!km) { return NULL; }
+
+    int num_files_in_json = cJSON_GetArraySize(files_json);
+    for (int i = 0; i < num_files_in_json; ++i) {
+        cJSON *file_item = cJSON_GetArrayItem(files_json, i);
+        FileMetadata *fm = file_metadata_from_json(file_item);
+        if (!fm) {
+            LOG_ERROR("Failed to parse FileMetadata from JSON at index %d.", i);
+            key_map_free(km);
+            return NULL;
+        }
+        if (key_map_add_file(km, fm) != 0) {
+            LOG_ERROR("Failed to add parsed FileMetadata to KeyMap.");
+            file_metadata_free(fm); // Free fm as key_map_add_file failed to take ownership
+            key_map_free(km);
+            return NULL;
+        }
+    }
+
+    return km;
+}
+
+
+// --- Zstandard Compression/Decompression for KeyMap ---
+
+int key_map_save_json_zst(const KeyMap *key_map, const char *file_path) {
+    if (!key_map || !file_path) {
+        LOG_ERROR("Invalid arguments for key_map_save_json_zst.");
+        return -1;
+    }
+
+    cJSON *json_obj = key_map_to_json(key_map);
+    if (!json_obj) {
+        LOG_ERROR("Failed to convert KeyMap to JSON.");
+        return -1;
+    }
+
+    char *json_string = cJSON_PrintUnformatted(json_obj);
+    if (!json_string) {
+        LOG_ERROR("Failed to print JSON string.");
+        cJSON_Delete(json_obj);
+        return -1;
+    }
+    size_t json_len = strlen(json_string);
+
+    size_t compressed_buf_size = ZSTD_compressBound(json_len);
+    void *compressed_buf = malloc(compressed_buf_size);
+    if (!compressed_buf) {
+        LOG_ERROR("Failed to allocate compression buffer.");
+        free(json_string);
+        cJSON_Delete(json_obj);
+        return -1;
+    }
+
+    size_t compressed_len = ZSTD_compress(compressed_buf, compressed_buf_size,
+                                         json_string, json_len, ZSTD_CLEVEL_DEFAULT);
+    if (ZSTD_isError(compressed_len)) {
+        LOG_ERROR("ZSTD compression failed: %s", ZSTD_getErrorName(compressed_len));
+        free(json_string);
+        free(compressed_buf);
+        cJSON_Delete(json_obj);
+        return -1;
+    }
+
+    FILE *fp = fopen(file_path, "wb");
+    if (!fp) {
+        LOG_ERROR("Failed to open file '%s' for writing compressed keymap: %s", file_path, strerror(errno));
+        free(json_string);
+        free(compressed_buf);
+        cJSON_Delete(json_obj);
+        return -1;
+    }
+
+    if (fwrite(compressed_buf, 1, compressed_len, fp) != compressed_len) {
+        LOG_ERROR("Failed to write compressed data to file '%s': %s", file_path, strerror(errno));
+        fclose(fp);
+        free(json_string);
+        free(compressed_buf);
+        cJSON_Delete(json_obj);
+        return -1;
+    }
+
+    fclose(fp);
+    free(json_string);
+    free(compressed_buf);
+    cJSON_Delete(json_obj);
+    LOG_INFO("KeyMap saved successfully to '%s'.", file_path);
+    return 0;
+}
+
+KeyMap* key_map_load_json_zst(const char *file_path) {
+    if (!file_path) {
+        LOG_ERROR("Invalid file_path for key_map_load_json_zst.");
+        return NULL;
+    }
+
+    FILE *fp = fopen(file_path, "rb");
+    if (!fp) {
+        LOG_WARNING("Keymap file '%s' not found: %s", file_path, strerror(errno));
+        return NULL; // Not necessarily an error, might be first run
+    }
+
+    struct stat st;
+    if (fstat(fileno(fp), &st) != 0) {
+        LOG_ERROR("Failed to stat file '%s': %s", file_path, strerror(errno));
+        fclose(fp);
+        return NULL;
+    }
+    size_t compressed_len = st.st_size;
+
+    void *compressed_buf = malloc(compressed_len);
+    if (!compressed_buf) {
+        LOG_ERROR("Failed to allocate buffer for compressed keymap.");
+        fclose(fp);
+        return NULL;
+    }
+
+    if (fread(compressed_buf, 1, compressed_len, fp) != compressed_len) {
+        LOG_ERROR("Failed to read compressed data from file '%s': %s", file_path, strerror(errno));
+        fclose(fp);
+        free(compressed_buf);
+        return NULL;
+    }
+    fclose(fp);
+
+    unsigned long long decompressed_buf_size = ZSTD_getFrameContentSize(compressed_buf, compressed_len);
+    if (decompressed_buf_size == ZSTD_CONTENTSIZE_ERROR) {
+        LOG_ERROR("Invalid ZSTD compressed data in '%s'.", file_path);
+        free(compressed_buf);
+        return NULL;
+    } else if (decompressed_buf_size == ZSTD_CONTENTSIZE_UNKNOWN) {
+        // Handle unknown size, e.g., by decompressing into a growing buffer
+        LOG_WARNING("Unknown decompressed size for '%s', using a default max.", file_path);
+        decompressed_buf_size = 10 * 1024 * 1024; // 10MB default max
+    }
+
+    char *decompressed_buf = (char*)malloc(decompressed_buf_size + 1); // +1 for null terminator
+    if (!decompressed_buf) {
+        LOG_ERROR("Failed to allocate decompressed buffer.");
+        free(compressed_buf);
+        return NULL;
+    }
+
+    size_t decompressed_len = ZSTD_decompress(decompressed_buf, decompressed_buf_size,
+                                              compressed_buf, compressed_len);
+    if (ZSTD_isError(decompressed_len)) {
+        LOG_ERROR("ZSTD decompression failed for '%s': %s", file_path, ZSTD_getErrorName(decompressed_len));
+        free(compressed_buf);
+        free(decompressed_buf);
+        return NULL;
+    }
+    decompressed_buf[decompressed_len] = '\0'; // Null-terminate the decompressed string
+
+    free(compressed_buf); // Free compressed buffer as it's no longer needed
+
+    cJSON *json_obj = cJSON_Parse(decompressed_buf);
+    if (!json_obj) {
+        const char *error_ptr = cJSON_GetErrorPtr();
+        if (error_ptr != NULL) {
+            LOG_ERROR("Error parsing JSON from '%s': %s", file_path, error_ptr);
+        }
+        free(decompressed_buf);
+        return NULL;
+    }
+
+    KeyMap *key_map = key_map_from_json(json_obj);
+    if (!key_map) {
+        LOG_ERROR("Failed to convert JSON to KeyMap from '%s'.", file_path);
+    }
+
+    cJSON_Delete(json_obj);
+    free(decompressed_buf);
+    return key_map;
+}
+
+
+// --- Disguised Keymap Functions ---
+
+// Base template for the disguise formats
+static const char *CSV_TEMPLATE =
+    "id,timestamp,event_type,details,data_b64\n"
+    "1,%s,INFO,Keymap data follows,%s\n";
+
+static const char *LOG_TEMPLATE =
+    "[%s] INFO - Application started.\n"
+    "[%s] DEBUG - Loading configuration from /etc/app.conf.\n"
+    "[%s] INFO - Initializing core modules.\n"
+    "[%s] DATA - Hidden keymap data: %s\n"
+    "[%s] INFO - Core modules initialized successfully.\n";
+
+static const char *CONF_TEMPLATE =
+    "# Configuration file for application_v1.2\n"
+    "[General]\n"
+    "LogLevel=INFO\n"
+    "MaxConnections=100\n"
+    "\n"
+    "[Security]\n"
+    "EncryptionEnabled=true\n"
+    "AuthMethod=JWT\n"
+    "SecretKeyBase64=\"%s\"\n" // This is where the keymap goes
+    "\n"
+    "[Network]\n"
+    "Port=8080\n"
+    "Interface=eth0\n";
+
+
+// Helper to get timestamp for disguised files
+static void get_timestamp(char *buffer, size_t buffer_size) {
+    time_t timer;
+    struct tm* tm_info;
+    time(&timer);
+    tm_info = localtime(&timer);
+    strftime(buffer, buffer_size, "%Y-%m-%d %H:%M:%S", tm_info);
+}
+
+// Internal function to save the keymap data into a specific disguised file
+static int save_disguised_file(const char *file_path, const char *keymap_b64, DisguiseFormat format) {
+    FILE *fp = fopen(file_path, "wb");
+    if (!fp) {
+        LOG_ERROR("Failed to open disguised file '%s' for writing: %s", file_path, strerror(errno));
+        return -1;
+    }
+
+    char timestamp[26];
+    get_timestamp(timestamp, sizeof(timestamp));
+
+    int ret = 0;
+    switch (format) {
+        case DISGUISE_CSV:
+            if (fprintf(fp, CSV_TEMPLATE, timestamp, keymap_b64) < 0) ret = -1;
+            break;
+        case DISGUISE_LOG:
+            if (fprintf(fp, LOG_TEMPLATE, timestamp, timestamp, timestamp, timestamp, keymap_b64, timestamp) < 0) ret = -1;
+            break;
+        case DISGUISE_CONF:
+            if (fprintf(fp, CONF_TEMPLATE, keymap_b64) < 0) ret = -1;
+            break;
+        default:
+            LOG_ERROR("Unsupported disguise format for saving.");
+            ret = -1;
+            break;
+    }
+
+    if (ret == -1) {
+        LOG_ERROR("Failed to write to disguised file '%s'.", file_path);
+    } else {
+        LOG_INFO("Disguised keymap saved to '%s'.", file_path);
+    }
+    fclose(fp);
+    return ret;
+}
+
+int disguise_key_save(const KeyMap *key_map, const char *output_dir, DisguiseFormat format) {
+    if (!key_map || !output_dir || format == DISGUISE_NONE) {
+        LOG_ERROR("Invalid arguments for disguise_key_save.");
+        return -1;
+    }
+
+    if (ensure_dirs(output_dir) != 0) {
+        LOG_ERROR("Failed to ensure output directory for disguised keymap.");
+        return -1;
+    }
+
+    cJSON *json_obj = key_map_to_json(key_map);
+    if (!json_obj) {
+        LOG_ERROR("Failed to convert KeyMap to JSON for disguise.");
+        return -1;
+    }
+    char *json_string = cJSON_PrintUnformatted(json_obj);
+    cJSON_Delete(json_obj);
+    if (!json_string) {
+        LOG_ERROR("Failed to print JSON string for disguise.");
+        return -1;
+    }
+    size_t json_len = strlen(json_string);
+
+    char *keymap_b64 = NULL;
+    size_t keymap_b64_len = 0;
+    if (base64_encode((unsigned char*)json_string, json_len, &keymap_b64, &keymap_b64_len) != 0) {
+        LOG_ERROR("Failed to Base64 encode keymap for disguise.");
+        free(json_string);
+        return -1;
+    }
+    free(json_string);
+
+    char file_path[PATH_MAX];
+    const char *filename_suffix;
+    switch (format) {
+        case DISGUISE_CSV:  filename_suffix = "keymap.csv"; break;
+        case DISGUISE_LOG:  filename_suffix = "application.log"; break;
+        case DISGUISE_CONF: filename_suffix = "config.conf"; break;
+        default:
+            LOG_ERROR("Unsupported disguise format.");
+            free(keymap_b64);
+            return -1;
+    }
+
+    snprintf(file_path, PATH_MAX, "%s/%s", output_dir, filename_suffix);
+    file_path[PATH_MAX - 1] = '\0'; // Ensure null termination
+
+    int ret = save_disguised_file(file_path, keymap_b64, format);
+    free(keymap_b64);
+    return ret;
+}
+
+// Internal function to extract the base64 encoded data from a disguised file
+static char* extract_data_from_disguised_file(const char *file_path, DisguiseFormat format) {
+    FILE *fp = fopen(file_path, "rb");
+    if (!fp) {
+        LOG_ERROR("Failed to open disguised file '%s' for reading: %s", file_path, strerror(errno));
+        return NULL;
+    }
+
+    char *line = NULL;
+    size_t len = 0;
+    ssize_t read;
+    char *extracted_b64 = NULL;
+
+    switch (format) {
+        case DISGUISE_CSV: {
+            // Skip header, read second line
+            if ((read = getline(&line, &len, fp)) == -1) { // Read header
+                LOG_ERROR("CSV file empty or read error: %s", file_path);
+                goto cleanup_read;
+            }
+            if ((read = getline(&line, &len, fp)) != -1) { // Read data line
+                char *token = strtok(line, ","); // id
+                token = strtok(NULL, ","); // timestamp
+                token = strtok(NULL, ","); // event_type
+                token = strtok(NULL, ","); // details
+                token = strtok(NULL, "\n"); // data_b64 (rest of the line)
+                if (token) extracted_b64 = strdup(token);
+            }
+            break;
+        }
+        case DISGUISE_LOG: {
+            while ((read = getline(&line, &len, fp)) != -1) {
+                // Look for the specific pattern "[%s] DATA - Hidden keymap data: %s\n"
+                char *data_prefix = strstr(line, "DATA - Hidden keymap data: ");
+                if (data_prefix) {
+                    extracted_b64 = strdup(data_prefix + strlen("DATA - Hidden keymap data: "));
+                    // Remove trailing newline if present
+                    size_t b64_len = strlen(extracted_b64);
+                    if (b64_len > 0 && extracted_b64[b64_len - 1] == '\n') {
+                        extracted_b64[b64_len - 1] = '\0';
+                    }
+                    break;
+                }
+            }
+            break;
+        }
+        case DISGUISE_CONF: {
+            while ((read = getline(&line, &len, fp)) != -1) {
+                // Look for SecretKeyBase64="<data>"
+                char *key_prefix = strstr(line, "SecretKeyBase64=\"");
+                if (key_prefix) {
+                    key_prefix += strlen("SecretKeyBase64=\"");
+                    char *end_quote = strchr(key_prefix, '\"');
+                    if (end_quote) {
+                        *end_quote = '\0'; // Null-terminate the string at the end quote
+                        extracted_b64 = strdup(key_prefix);
+                    }
+                    break;
+                }
+            }
+            break;
+        }
+        default:
+            LOG_ERROR("Unsupported disguise format for loading.");
+            break;
+    }
+
+cleanup_read:
+    if (line) free(line);
+    fclose(fp);
+    return extracted_b64;
+}
+
+KeyMap* decode_disguised_key_load(const char *file_path, DisguiseFormat format) {
+    if (!file_path || format == DISGUISE_NONE) {
+        LOG_ERROR("Invalid arguments for decode_disguised_key_load.");
+        return NULL;
+    }
+
+    char *keymap_b64 = extract_data_from_disguised_file(file_path, format);
+    if (!keymap_b64) {
+        LOG_ERROR("Failed to extract Base64 data from disguised file '%s'.", file_path);
+        return NULL;
+    }
+
+    unsigned char *json_data = NULL;
+    size_t json_len = 0;
+    if (base64_decode(keymap_b64, strlen(keymap_b64), &json_data, &json_len) != 0) {
+        LOG_ERROR("Failed to Base64 decode extracted data from '%s'.", file_path);
+        free(keymap_b64);
+        return NULL;
+    }
+    free(keymap_b64);
+
+    // Add null terminator just in case cJSON_Parse expects a string
+    char *json_string = (char*)malloc(json_len + 1);
+    if (!json_string) {
+        LOG_ERROR("Failed to allocate memory for JSON string.");
+        free(json_data);
+        return NULL;
+    }
+    memcpy(json_string, json_data, json_len);
+    json_string[json_len] = '\0';
+    free(json_data); // json_data copied to json_string
+
+    cJSON *json_obj = cJSON_Parse(json_string);
+    if (!json_obj) {
+        const char *error_ptr = cJSON_GetErrorPtr();
+        if (error_ptr != NULL) {
+            LOG_ERROR("Error parsing JSON from disguised file '%s': %s", file_path, error_ptr);
+        }
+        free(json_string);
+        return NULL;
+    }
+    free(json_string);
+
+    KeyMap *key_map = key_map_from_json(json_obj);
+    if (!key_map) {
+        LOG_ERROR("Failed to convert JSON to KeyMap from disguised file '%s'.", file_path);
+    }
+    cJSON_Delete(json_obj);
+
+    if (key_map) {
+        LOG_INFO("KeyMap loaded successfully from disguised file '%s'.", file_path);
+    }
+    return key_map;
+}
+#ifndef VERIDUCT_CORE_H
+#define VERIDUCT_CORE_H
+
+#include "common.h"
+#include "veriduct_keymap.h" // For KeyMap and FileMetadata structures
+#include "veriduct_storage.h" // For ChunkStorage
+
+// Annihilates a given file, storing its chunks and metadata.
+// file_path: The path to the file to be annihilated.
+// storage: Pointer to the initialized ChunkStorage.
+// master_key: The master key for HMAC and other crypto operations.
+// master_key_len: Length of the master key.
+// key_map: The KeyMap structure to update with the annihilated file's metadata.
+// Returns 0 on success, -1 on failure.
+int annihilate_path(const char *file_path, ChunkStorage *storage,
+                    const unsigned char *master_key, size_t master_key_len,
+                    KeyMap *key_map);
+
+// Reassembles a file from its chunks and metadata.
+// file_path: The desired path for the reassembled file (output).
+// storage: Pointer to the initialized ChunkStorage.
+// master_key: The master key used for HMAC verification.
+// master_key_len: Length of the master key.
+// file_metadata: The FileMetadata object for the file to reassemble.
+// Returns 0 on success, -1 on failure.
+int reassemble_path(const char *file_path, ChunkStorage *storage,
+                    const unsigned char *master_key, size_t master_key_len,
+                    const FileMetadata *file_metadata);
+
+#endif // VERIDUCT_CORE_H
+#include "common.h"
+#include "veriduct_crypto.h"
+#include "veriduct_utils.h"
+#include "veriduct_storage.h"
+#include "veriduct_keymap.h"
+#include "veriduct_core.h"
+#include <errno.h>
+#include <libgen.h>
+#include <sys/stat.h>
+#include <string.h>
+
+#ifdef _WIN32
+#include <direct.h>
+#define RMDIR(path) _rmdir(path)
+#define REMOVE(path) _unlink(path)
+#else
+#include <unistd.h>
+#define RMDIR(path) rmdir(path)
+#define REMOVE(path) unlink(path)
+#endif
+
+
+// Global variable for verbosity (defined in common.c, declared in common.h)
+// LogLevel VERBOSITY_LEVEL = LOG_LEVEL_INFO;
+
+// Function to remove a directory and its contents (simple, non-recursive for testing)
+// This only works for empty directories. For recursive deletion, a more complex function is needed.
+int remove_test_dir(const char *path) {
+    struct stat st;
+    if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+        if (RMDIR(path) == 0) {
+            LOG_DEBUG("Successfully removed directory: %s", path);
+            return 0;
+        } else {
+            LOG_WARNING("Failed to remove directory '%s': %s", path, strerror(errno));
+            return -1;
+        }
+    }
+    return 0; // Not a directory or doesn't exist, consider it "removed" or not needing removal
+}
+
+// Helper to create a dummy file for testing
+int create_dummy_file(const char *filepath, long size_bytes) {
+    char *dir_copy = strdup(filepath);
+    if (!dir_copy) {
+        LOG_ERROR("Failed to duplicate filepath for dirname.");
+        return -1;
+    }
+    char *dir = dirname(dir_copy);
+    if (ensure_dirs(dir) != 0) {
+        LOG_ERROR("Failed to ensure directory for dummy file.");
+        free(dir_copy);
+        return -1;
+    }
+    free(dir_copy);
+
+
+    FILE *fp = fopen(filepath, "wb");
+    if (!fp) {
+        LOG_ERROR("Failed to create dummy file '%s': %s", filepath, strerror(errno));
+        return -1;
+    }
+
+    unsigned char *buffer = (unsigned char*)malloc(1024); // Write in 1KB chunks
+    if (!buffer) {
+        LOG_ERROR("Failed to allocate buffer for dummy file creation.");
+        fclose(fp);
+        return -1;
+    }
+    generate_random_bytes(buffer, 1024);
+
+    long written_total = 0;
+    while (written_total < size_bytes) {
+        size_t to_write = 1024;
+        if (written_total + to_write > size_bytes) {
+            to_write = size_bytes - written_total;
+        }
+        if (fwrite(buffer, 1, to_write, fp) != to_write) {
+            LOG_ERROR("Error writing to dummy file '%s': %s", filepath, strerror(errno));
+            free(buffer);
+            fclose(fp);
+            return -1;
+        }
+        written_total += to_write;
+    }
+
+    free(buffer);
+    fclose(fp);
+    LOG_DEBUG("Dummy file '%s' created with %ld bytes.", filepath, size_bytes);
+    return 0;
+}
+
+// Helper to compare file content
+int compare_files(const char *path1, const char *path2) {
+    FILE *fp1 = fopen(path1, "rb");
+    FILE *fp2 = fopen(path2, "rb");
+    if (!fp1 || !fp2) {
+        LOG_ERROR("Failed to open files for comparison: %s, %s", path1, path2);
+        if (fp1) fclose(fp1); if (fp2) fclose(fp2);
+        return -1;
+    }
+
+    struct stat st1, st2;
+    if (fstat(fileno(fp1), &st1) != 0 || fstat(fileno(fp2), &st2) != 0) {
+        LOG_ERROR("Failed to stat files for comparison: %s, %s", path1, path2);
+        fclose(fp1); fclose(fp2);
+        return -1;
+    }
+
+    if (st1.st_size != st2.st_size) {
+        LOG_WARNING("File sizes differ: %s (%ld bytes) vs %s (%ld bytes).", path1, st1.st_size, path2, st2.st_size);
+        fclose(fp1); fclose(fp2);
+        return 1; // Indicate difference
+    }
+
+    unsigned char buf1[4096];
+    unsigned char buf2[4096];
+    size_t bytes_read1, bytes_read2;
+    int diff = 0;
+
+    while ((bytes_read1 = fread(buf1, 1, sizeof(buf1), fp1)) > 0) {
+        bytes_read2 = fread(buf2, 1, sizeof(buf2), fp2);
+        if (bytes_read1 != bytes_read2 || memcmp(buf1, buf2, bytes_read1) != 0) {
+            diff = 1; // Files differ
+            break;
+        }
+    }
+
+    fclose(fp1);
+    fclose(fp2);
+    return diff;
+}
+
+void print_usage(const char *prog_name) {
+    printf("Usage: %s [OPTIONS] COMMAND [ARGS...]\n", prog_name);
+    printf("Veriduct - Secure file annihilation and reassembly.\n\n");
+    printf("Commands:\n");
+    printf("  annihilate <file_path>           Annihilates a file, storing its chunks and metadata.\n");
+    printf("                                   The original file is overwritten with random data.\n");
+    printf("  reassemble <key_path> <keymap_entry_filename> <output_file_path>\n");
+    printf("                                   Reassembles a file from a keymap entry.\n");
+    printf("                                   <key_path> is the path to the keymap file (e.g., keymap.zst).\n");
+    printf("                                   <keymap_entry_filename> is the original relative filename as stored in the keymap.\n");
+    printf("                                   <output_file_path> is the desired output path for the reassembled file.\n");
+    printf("  test                             Runs all internal unit tests.\n\n");
+    printf("Options:\n");
+    printf("  -d, --db <path>                  Specify the path to the chunk storage database (default: chunks.db).\n");
+    printf("  -k, --keyfile <path>             Specify the path to the keymap file (default: keymap.zst).\n");
+    printf("                                   Used for storing metadata during annihilation, or loading during reassembly.\n");
+    printf("  -m, --masterkey <hex_key>        Provide the master key as a 64-character hex string.\n");
+    printf("                                   If not provided, a random key is generated for 'annihilate' and must be\n");
+    printf("                                   explicitly provided for 'reassemble' using the same key.\n");
+    printf("  -p, --password <password>        Use a password to derive the master key (safer than --masterkey).\n");
+    printf("  -s, --disguise-save <format>     Save the keymap in a disguised format (csv, log, conf).\n");
+    printf("                                   Requires --keyfile and --output-dir.\n");
+    printf("  -l, --disguise-load <format>     Load the keymap from a disguised format (csv, log, conf).\n");
+    printf("                                   Requires --keyfile.\n");
+    printf("  -o, --output-dir <path>          Output directory for disguised keymaps (default: current directory).\n");
+    printf("  -v, --verbose                    Increase verbosity (can be used multiple times for more debug info).\n");
+    printf("  -h, --help                       Display this help message.\n");
+}
+
+
+// Function to run all internal tests
+int run_all_tests(unsigned char *master_key, size_t master_key_len, const char *test_db_path, const char *test_key_file) {
+    LOG_INFO("\n--- Starting All Internal Veriduct Tests ---");
+    int overall_test_status = EXIT_SUCCESS; // Assume success
+
+    // --- Setup Storage and KeyMap for tests ---
+    ChunkStorage *storage = chunk_storage_init(test_db_path);
+    if (!storage) {
+        LOG_ERROR("Failed to initialize chunk storage for tests.");
+        overall_test_status = EXIT_FAILURE;
+        goto cleanup_test_main;
+    }
+
+    KeyMap *master_key_map = key_map_create();
+    if (!master_key_map) {
+        LOG_ERROR("Failed to create master KeyMap for tests.");
+        overall_test_status = EXIT_FAILURE;
+        goto cleanup_test_main;
+    }
+
+    // --- KeyMap & JSON Serialization Tests (with Zstd) ---
+    LOG_INFO("\n--- Running KeyMap & JSON Serialization Tests (with Zstd) ---");
+    KeyMap *my_keymap = key_map_create();
+    if (!my_keymap) { LOG_ERROR("Failed to create KeyMap object for Zstd test."); overall_test_status = EXIT_FAILURE; goto cleanup_zstd_test; }
+
+    char usf_hash_file1[SHA256_HEX_LEN] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    char mac_file1[SHA256_HEX_LEN] = "1111111111111111111111111111111111111111111111111111111111111111";
+    unsigned char salt_file1[FILE_SALT_SIZE]; generate_random_bytes(salt_file1, FILE_SALT_SIZE);
+    unsigned char header_file1[] = {0xDE, 0xAD, 0xBE, 0xEF};
+    char *chunks_file1[] = {"hash_a1", "hash_a2", "hash_a3"};
+
+    FileMetadata *fm1 = file_metadata_create("file1.txt", salt_file1, sizeof(salt_file1), usf_hash_file1, mac_file1, header_file1, sizeof(header_file1), chunks_file1, 3);
+    if (!fm1) { LOG_ERROR("Failed to create FileMetadata 1 for Zstd test."); overall_test_status = EXIT_FAILURE; goto cleanup_zstd_test; }
+    if (key_map_add_file(my_keymap, fm1) != 0) { LOG_ERROR("Failed to add FileMetadata 1 to KeyMap for Zstd test."); overall_test_status = EXIT_FAILURE; goto cleanup_zstd_test; }
+
+    char usf_hash_file2[SHA256_HEX_LEN] = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    char mac_file2[SHA256_HEX_LEN] = "";
+    unsigned char salt_file2[FILE_SALT_SIZE]; generate_random_bytes(salt_file2, FILE_SALT_SIZE);
+    unsigned char *header_file2 = NULL;
+    char *chunks_file2[] = {"hash_b1", "hash_b2"};
+
+    FileMetadata *fm2 = file_metadata_create("subdir/file2.log", salt_file2, sizeof(salt_file2), usf_hash_file2, mac_file2, header_file2, 0, chunks_file2, 2);
+    if (!fm2) { LOG_ERROR("Failed to create FileMetadata 2 for Zstd test."); overall_test_status = EXIT_FAILURE; goto cleanup_zstd_test; }
+    if (key_map_add_file(my_keymap, fm2) != 0) { LOG_ERROR("Failed to add FileMetadata 2 to KeyMap for Zstd test."); overall_test_status = EXIT_FAILURE; goto cleanup_zstd_test; }
+
+    if (key_map_save_json_zst(my_keymap, test_key_file) != 0) { LOG_ERROR("Failed to save keymap to JSON file with Zstd."); overall_test_status = EXIT_FAILURE; goto cleanup_zstd_test; }
+    KeyMap *loaded_keymap_zstd = key_map_load_json_zst(test_key_file);
+    if (!loaded_keymap_zstd) { LOG_ERROR("Failed to load keymap from Zstd JSON file."); overall_test_status = EXIT_FAILURE; goto cleanup_zstd_test; }
+    if (loaded_keymap_zstd->num_files != 2 || !key_map_get_file_metadata(loaded_keymap_zstd, "file1.txt") || !key_map_get_file_metadata(loaded_keymap_zstd, "subdir/file2.log")) {
+        LOG_ERROR("Loaded KeyMap (Zstd) has incorrect data."); overall_test_status = EXIT_FAILURE;
+    }
+    key_map_free(my_keymap); // Free the original keymap, loaded_keymap_zstd is separate
+    my_keymap = NULL; // Set to NULL to prevent double free in cleanup_zstd_test
+    key_map_free(loaded_keymap_zstd);
+    loaded_keymap_zstd = NULL; // Set to NULL
+    REMOVE(test_key_file);
+    LOG_INFO("KeyMap & JSON/Zstd tests passed.");
+
+    // --- Disguised Keymap Tests ---
+    LOG_INFO("\n--- Running Disguised Keymap Tests ---");
+    const char *disguise_output_dir = "disguised_keys_output";
+    if (ensure_dirs(disguise_output_dir) != 0) { LOG_ERROR("Failed to create disguise output directory."); overall_test_status = EXIT_FAILURE; goto cleanup_test_main; }
+
+    KeyMap *disguise_test_keymap = key_map_create();
+    if (!disguise_test_keymap) { LOG_ERROR("Failed to create KeyMap for disguise test."); overall_test_status = EXIT_FAILURE; goto cleanup_test_main; }
+    // Re-create fm1 for this test, as it was freed with my_keymap earlier
+    fm1 = file_metadata_create("file1.txt", salt_file1, sizeof(salt_file1), usf_hash_file1, mac_file1, header_file1, sizeof(header_file1), chunks_file1, 3);
+    if (key_map_add_file(disguise_test_keymap, fm1) != 0) { LOG_ERROR("Failed to add file1 for disguise test."); overall_test_status = EXIT_FAILURE; goto cleanup_test_main; }
+
+
+    // Test CSV save/load
+    char csv_path[PATH_MAX];
+    snprintf(csv_path, PATH_MAX, "%s/keymap.csv", disguise_output_dir);
+    if (disguise_key_save(disguise_test_keymap, disguise_output_dir, DISGUISE_CSV) != 0) { LOG_ERROR("Failed to save keymap as CSV."); overall_test_status = EXIT_FAILURE; }
+    KeyMap *loaded_csv_keymap = decode_disguised_key_load(csv_path, DISGUISE_CSV);
+    if (!loaded_csv_keymap || loaded_csv_keymap->num_files != disguise_test_keymap->num_files) { LOG_ERROR("Failed to load or verify keymap from CSV."); overall_test_status = EXIT_FAILURE; }
+    key_map_free(loaded_csv_keymap);
+    REMOVE(csv_path); // Clean up disguise file
+
+
+    // Test LOG save/load
+    char log_path[PATH_MAX];
+    snprintf(log_path, PATH_MAX, "%s/application.log", disguise_output_dir);
+    if (disguise_key_save(disguise_test_keymap, disguise_output_dir, DISGUISE_LOG) != 0) { LOG_ERROR("Failed to save keymap as LOG."); overall_test_status = EXIT_FAILURE; }
+    KeyMap *loaded_log_keymap = decode_disguised_key_load(log_path, DISGUISE_LOG);
+    if (!loaded_log_keymap || loaded_log_keymap->num_files != disguise_test_keymap->num_files) { LOG_ERROR("Failed to load or verify keymap from LOG."); overall_test_status = EXIT_FAILURE; }
+    key_map_free(loaded_log_keymap);
+    REMOVE(log_path); // Clean up disguise file
+
+
+    // Test CONF save/load
+    char conf_path[PATH_MAX];
+    snprintf(conf_path, PATH_MAX, "%s/config.conf", disguise_output_dir);
+    if (disguise_key_save(disguise_test_keymap, disguise_output_dir, DISGUISE_CONF) != 0) { LOG_ERROR("Failed to save keymap as CONF."); overall_test_status = EXIT_FAILURE; }
+    KeyMap *loaded_conf_keymap = decode_disguised_key_load(conf_path, DISGUISE_CONF);
+    if (!loaded_conf_keymap || loaded_conf_keymap->num_files != disguise_test_keymap->num_files) { LOG_ERROR("Failed to load or verify keymap from CONF."); overall_test_status = EXIT_FAILURE; }
+    key_map_free(loaded_conf_keymap);
+    REMOVE(conf_path); // Clean up disguise file
+
+
+    key_map_free(disguise_test_keymap);
+    remove_test_dir(disguise_output_dir);
+    LOG_INFO("Disguised Keymap tests passed.");
+
+    // --- Core Annihilation and Reassembly Tests ---
+    LOG_INFO("\n--- Running Core Annihilation and Reassembly Tests ---");
+    const char *original_file_path = "test_data/my_document.txt";
+    const char *reassembled_file_path = "reassembled_data/my_document.txt";
+    long test_file_size = CHUNK_SIZE * 3 + 123; // A few chunks plus some bytes
+
+    if (ensure_dirs("test_data") != 0 || ensure_dirs("reassembled_data") != 0) { LOG_ERROR("Failed to create test directories."); overall_test_status = EXIT_FAILURE; goto cleanup_test_main; }
+    if (create_dummy_file(original_file_path, test_file_size) != 0) { LOG_ERROR("Failed to create original dummy file."); overall_test_status = EXIT_FAILURE; goto cleanup_test_main; }
+
+    char original_file_hash[SHA256_HEX_LEN];
+    if (sha256_file(original_file_path, original_file_hash) != 0) { LOG_ERROR("Failed to hash original file."); overall_test_status = EXIT_FAILURE; goto cleanup_test_main; }
+    LOG_INFO("Original file hash: %s", original_file_hash);
+
+    if (annihilate_path(original_file_path, storage, master_key, master_key_len, master_key_map) != 0) { LOG_ERROR("Annihilation failed."); overall_test_status = EXIT_FAILURE; goto cleanup_test_main; }
+    FileMetadata *fm_to_reassemble = key_map_get_file_metadata(master_key_map, "test_data/my_document.txt");
+    if (!fm_to_reassemble) { LOG_ERROR("File metadata not found after annihilation."); overall_test_status = EXIT_FAILURE; goto cleanup_test_main; }
+
+    if (reassemble_path(reassembled_file_path, storage, master_key, master_key_len, fm_to_reassemble) != 0) { LOG_ERROR("Reassembly failed."); overall_test_status = EXIT_FAILURE; goto cleanup_test_main; }
+    if (compare_files(original_file_path, reassembled_file_path) != 0) { LOG_ERROR("Reassembled file DOES NOT match original file!"); overall_test_status = EXIT_FAILURE; }
+
+    REMOVE(original_file_path);
+    REMOVE(reassembled_file_path);
+    remove_test_dir("test_data");
+    remove_test_dir("reassembled_data");
+    LOG_INFO("Core Annihilation and Reassembly tests passed.");
+
+
+cleanup_zstd_test: // Specific cleanup for Zstd test
+    if (my_keymap) key_map_free(my_keymap);
+    if (loaded_keymap_zstd) key_map_free(loaded_keymap_zstd);
+
+
+cleanup_test_main:
+    if (storage) chunk_storage_close(storage);
+    REMOVE(test_db_path); // Remove the test database file
+    if (master_key_map) key_map_free(master_key_map);
+
+    if (overall_test_status == EXIT_SUCCESS) {
+        LOG_INFO("\nAll internal tests completed successfully.");
+    } else {
+        LOG_ERROR("\nSome internal tests FAILED.");
+    }
+    return overall_test_status;
+}
+
+
+int main(int argc, char *argv[]) {
+    // Default values
+    const char *db_path = "chunks.db";
+    const char *keymap_path = "keymap.zst";
+    unsigned char master_key[MASTER_KEY_SIZE];
+    bool master_key_provided = false;
+    char master_key_hex_str[SHA256_HEX_LEN] = {0};
+    char *password = NULL;
+    DisguiseFormat save_disguise_format = DISGUISE_NONE;
+    DisguiseFormat load_disguise_format = DISGUISE_NONE;
+    const char *output_dir = "."; // Current directory
+
+    // Command to execute
+    typedef enum { CMD_NONE, CMD_ANNIHILATE, CMD_REASSEMBLE, CMD_TEST } Command;
+    Command command = CMD_NONE;
+    char *file_arg = NULL; // For annihilate: file_path; For reassemble: key_path
+    char *keymap_entry_filename = NULL; // For reassemble: original relative path
+    char *output_file_arg = NULL; // For reassemble: output_file_path
+
+    // Define long options
+    static struct option long_options[] = {
+        {"db",           required_argument, 0, 'd'},
+        {"keyfile",      required_argument, 0, 'k'},
+        {"masterkey",    required_argument, 0, 'm'},
+        {"password",     required_argument, 0, 'p'},
+        {"disguise-save",required_argument, 0, 's'},
+        {"disguise-load",required_argument, 0, 'l'},
+        {"output-dir",   required_argument, 0, 'o'},
+        {"verbose",      no_argument,       0, 'v'},
+        {"help",         no_argument,       0, 'h'},
+        {0, 0, 0, 0}
+    };
+
+    int opt;
+    int option_index = 0;
+
+    // Parse options
+    while ((opt = getopt_long(argc, argv, "d:k:m:p:s:l:o:vh", long_options, &option_index)) != -1) {
+        switch (opt) {
+            case 'd': db_path = optarg; break;
+            case 'k': keymap_path = optarg; break;
+            case 'm':
+                if (strlen(optarg) != SHA256_HEX_LEN - 1) {
+                    LOG_ERROR("Master key must be a 64-character hex string.");
+                    print_usage(argv[0]);
+                    return EXIT_FAILURE;
+                }
+                if (hex_to_bin(optarg, SHA256_HEX_LEN - 1, master_key) != 0) {
+                    LOG_ERROR("Invalid hex master key provided.");
+                    return EXIT_FAILURE;
+                }
+                master_key_provided = true;
+                strncpy(master_key_hex_str, optarg, SHA256_HEX_LEN - 1);
+                master_key_hex_str[SHA256_HEX_LEN - 1] = '\0';
+                break;
+            case 'p': password = strdup(optarg); break;
+            case 's':
+                save_disguise_format = string_to_disguise_format(optarg);
+                if (save_disguise_format == DISGUISE_NONE) {
+                    LOG_ERROR("Invalid disguise format for saving: %s. Choose from csv, log, conf.", optarg);
+                    return EXIT_FAILURE;
+                }
+                break;
+            case 'l':
+                load_disguise_format = string_to_disguise_format(optarg);
+                if (load_disguise_format == DISGUISE_NONE) {
+                    LOG_ERROR("Invalid disguise format for loading: %s. Choose from csv, log, conf.", optarg);
+                    return EXIT_FAILURE;
+                }
+                break;
+            case 'o': output_dir = optarg; break;
+            case 'v': VERBOSITY_LEVEL++; break;
+            case 'h': print_usage(argv[0]); return EXIT_SUCCESS;
+            case '?':
+                print_usage(argv[0]);
+                return EXIT_FAILURE;
+        }
+    }
+
+    // Determine command and its arguments
+    if (optind < argc) {
+        if (strcmp(argv[optind], "annihilate") == 0) {
+            command = CMD_ANNIHILATE;
+            if (optind + 1 < argc) {
+                file_arg = argv[optind + 1]; // This is the file to annihilate
+            } else {
+                LOG_ERROR("Missing file path for 'annihilate' command.");
+                print_usage(argv[0]);
+                goto cleanup_main;
+            }
+        } else if (strcmp(argv[optind], "reassemble") == 0) {
+            command = CMD_REASSEMBLE;
+            if (optind + 3 < argc) { // Expecting key_path, keymap_entry_filename, output_file_path
+                file_arg = argv[optind + 1]; // This is the key_path (e.g., keymap.zst)
+                keymap_entry_filename = argv[optind + 2]; // This is the original relative filename
+                output_file_arg = argv[optind + 3]; // This is the desired output path
+            } else {
+                LOG_ERROR("Missing arguments for 'reassemble' command. Expected <key_path> <keymap_entry_filename> <output_file_path>.");
+                print_usage(argv[0]);
+                goto cleanup_main;
+            }
+        } else if (strcmp(argv[optind], "test") == 0) {
+            command = CMD_TEST;
+        } else {
+            LOG_ERROR("Unknown command: %s", argv[optind]);
+            print_usage(argv[0]);
+            goto cleanup_main;
+        }
+    } else {
+        // No command provided
+        print_usage(argv[0]);
+        goto cleanup_main;
+    }
+
+
+    // --- Master Key Derivation (if password provided) ---
+    if (password) {
+        if (master_key_provided) {
+            LOG_ERROR("Cannot provide both --masterkey and --password.");
+            goto cleanup_main;
+        }
+        unsigned char derived_key[MASTER_KEY_SIZE];
+        // Using a fixed salt and iteration count for PBKDF2 for demonstration.
+        // In a real application, consider deriving a unique per-keymap salt.
+        if (pbkdf2_sha256(password, strlen(password), (const unsigned char*)"veriduct_salt", 13, 100000, derived_key, MASTER_KEY_SIZE) != 0) {
+            LOG_ERROR("Failed to derive master key from password.");
+            goto cleanup_main;
+        }
+        memcpy(master_key, derived_key, MASTER_KEY_SIZE);
+        master_key_provided = true;
+        bin_to_hex(master_key, MASTER_KEY_SIZE, master_key_hex_str);
+        LOG_INFO("Master key derived from password: %s", master_key_hex_str);
+    } else if (!master_key_provided && (command == CMD_ANNIHILATE || command == CMD_TEST)) {
+        // Generate a random master key if annihilating or testing and no key/password is given
+        generate_random_bytes(master_key, MASTER_KEY_SIZE);
+        master_key_provided = true;
+        bin_to_hex(master_key, MASTER_KEY_SIZE, master_key_hex_str);
+        LOG_INFO("Generated new random master key: %s (SAVE THIS KEY for reassembly!)", master_key_hex_str);
+    }
+
+
+    // --- Execute Command ---
+    int result = EXIT_SUCCESS;
+    ChunkStorage *storage = NULL;
+    KeyMap *key_map = NULL; // Used for annihilation and testing
+
+    switch (command) {
+        case CMD_ANNIHILATE: {
+            if (!master_key_provided) {
+                LOG_ERROR("Master key or password is required for annihilation.");
+                result = EXIT_FAILURE;
+                break;
+            }
+            storage = chunk_storage_init(db_path);
+            if (!storage) { result = EXIT_FAILURE; break; }
+
+            // Load existing keymap or create new one
+            key_map = key_map_load_json_zst(keymap_path);
+            if (!key_map) {
+                LOG_WARNING("Keymap file '%s' not found or corrupted, creating a new one.", keymap_path);
+                key_map = key_map_create();
+                if (!key_map) { result = EXIT_FAILURE; break; }
+            }
+
+            LOG_INFO("Starting annihilation of '%s'...", file_arg);
+            if (annihilate_path(file_arg, storage, master_key, MASTER_KEY_SIZE, key_map) != 0) {
+                LOG_ERROR("Annihilation failed for '%s'.", file_arg);
+                result = EXIT_FAILURE;
+            } else {
+                LOG_INFO("Annihilation complete for '%s'.", file_arg);
+            }
+
+            // Save the updated keymap
+            if (key_map_save_json_zst(key_map, keymap_path) != 0) {
+                LOG_ERROR("Failed to save updated keymap to '%s'.", keymap_path);
+                result = EXIT_FAILURE;
+            }
+            if (save_disguise_format != DISGUISE_NONE) {
+                if (disguise_key_save(key_map, output_dir, save_disguise_format) != 0) {
+                    LOG_ERROR("Failed to save disguised keymap to '%s'.", output_dir);
+                    result = EXIT_FAILURE;
+                }
+            }
+            break;
+        }
+        case CMD_REASSEMBLE: {
+            if (!master_key_provided) {
+                LOG_ERROR("Master key or password is required for reassembly.");
+                result = EXIT_FAILURE;
+                break;
+            }
+            if (!file_arg || !keymap_entry_filename || !output_file_arg) {
+                LOG_ERROR("Missing arguments for 'reassemble' command.");
+                print_usage(argv[0]);
+                result = EXIT_FAILURE;
+                break;
+            }
+            storage = chunk_storage_init(db_path);
+            if (!storage) { result = EXIT_FAILURE; break; }
+
+            // Load keymap (potentially disguised)
+            KeyMap *loaded_keymap = NULL;
+            if (load_disguise_format != DISGUISE_NONE) {
+                loaded_keymap = decode_disguised_key_load(file_arg, load_disguise_format);
+            } else {
+                loaded_keymap = key_map_load_json_zst(file_arg);
+            }
+
+            if (!loaded_keymap) {
+                LOG_ERROR("Failed to load keymap from '%s'.", file_arg);
+                result = EXIT_FAILURE;
+                break;
+            }
+
+            FileMetadata *fm_to_reassemble = key_map_get_file_metadata(loaded_keymap, keymap_entry_filename);
+            if (!fm_to_reassemble) {
+                LOG_ERROR("File metadata for '%s' not found in keymap '%s'.", keymap_entry_filename, file_arg);
+                result = EXIT_FAILURE;
+                key_map_free(loaded_keymap);
+                break;
+            }
+
+            LOG_INFO("Starting reassembly of '%s' (from keymap) to '%s'...", keymap_entry_filename, output_file_arg);
+            if (reassemble_path(output_file_arg, storage, master_key, MASTER_KEY_SIZE, fm_to_reassemble) != 0) {
+                LOG_ERROR("Reassembly failed for '%s'.", keymap_entry_filename);
+                result = EXIT_FAILURE;
+            } else {
+                LOG_INFO("Reassembly complete for '%s'.", keymap_entry_filename);
+            }
+
+            if (loaded_keymap) key_map_free(loaded_keymap);
+            break;
+        }
+        case CMD_TEST: {
+            // For tests, we use specific paths to avoid conflicting with regular runs
+            const char *test_db = "test_chunks_for_tests.db";
+            const char *test_key = "test_keymap_for_tests.zst";
+            result = run_all_tests(master_key, MASTER_KEY_SIZE, test_db, test_key);
+            break;
+        }
+        case CMD_NONE:
+        default: {
+            print_usage(argv[0]);
+            result = EXIT_FAILURE;
+            break;
+        }
+    }
+
+cleanup_main:
+    if (storage) chunk_storage_close(storage);
+    if (key_map) key_map_free(key_map);
+    if (password) free(password);
+
+    return result;
+}

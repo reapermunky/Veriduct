@@ -1,0 +1,1273 @@
+package main
+
+import (
+	"bytes"
+	"compress/zstd"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/base64"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"math/filepath" // For os.PathSeparator etc.
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	_ "github.com/mattn/go-sqlite3" // SQLite driver
+)
+
+// Constants (Go equivalents for Python's global variables)
+const (
+	CHUNK_SIZE            = 4096
+	KEY_FILE              = "veriduct_key.zst"
+	DB_FILE               = "veriduct_chunks.db"
+	DEFAULT_USF_WIPE_SIZE = 256
+	BATCH_FLUSH_THRESHOLD = 1000
+	FILE_SALT_SIZE        = 16
+	KEYMAP_FORMAT_VERSION = 4
+)
+
+var (
+	DISGUISE_FORMATS = []string{"csv", "log", "conf"}
+)
+
+// Logger (Python's logging module equivalent)
+var logger *log.Logger
+
+func init() {
+	// Initialize logger to write to os.Stderr by default
+	logger = log.New(os.Stderr, "", log.LstdFlags)
+}
+
+// calculate_salted_chunk_hash (Python: hashlib.sha256(salt + chunk_data).hexdigest())
+func calculateSaltedChunkHash(salt []byte, chunkData []byte) string {
+	hasher := sha256.New()
+	hasher.Write(salt)
+	hasher.Write(chunkData)
+	return fmt.Sprintf("%x", hasher.Sum(nil))
+}
+
+// calculate_stream_hash (Python: for chunk in data_stream_iterator...)
+func calculateStreamHash(r io.Reader) (string, error) {
+	hasher := sha256.New()
+	_, err := io.Copy(hasher, r)
+	if err != nil {
+		return "", fmt.Errorf("error calculating stream hash: %w", err)
+	}
+	return fmt.Sprintf("%x", hasher.Sum(nil)), nil
+}
+
+// calculate_hmac (Python: hmac.new(key, message, hashlib.sha256).hexdigest())
+func calculateHMAC(key []byte, message []byte) string {
+	mac := hmac.New(sha256.New, key)
+	mac.Write(message)
+	return fmt.Sprintf("%x", mac.Sum(nil))
+}
+
+// calculate_file_hash (Python: with open(filepath, 'rb') as f: for chunk...)
+func calculateFileHash(filepath string) (string, error) {
+	f, err := os.Open(filepath)
+	if err != nil {
+		logger.Printf("Error opening file for hash calculation '%s': %v", filepath, err)
+		return "", fmt.Errorf("error opening file '%s': %w", filepath, err)
+	}
+	defer f.Close()
+
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, f); err != nil {
+		logger.Printf("Error reading file for hash calculation '%s': %v", filepath, err)
+		return "", fmt.Errorf("error reading file '%s': %w", filepath, err)
+	}
+	return fmt.Sprintf("%x", hasher.Sum(nil)), nil
+}
+
+// ensure_dirs (Python: os.makedirs(directory, exist_ok=True))
+func ensureDirs(directory string) error {
+	err := os.MkdirAll(directory, 0755) // 0755 is common permission for directories
+	if err != nil {
+		logger.Printf("Failed to create directory '%s': %v", directory, err)
+		return fmt.Errorf("failed to create directory '%s': %w", directory, err)
+	}
+	return nil
+}
+
+// ChunkStorage (Python class equivalent)
+type ChunkStorage struct {
+	dbPath string
+	db     *sql.DB
+}
+
+func NewChunkStorage(dbPath string) (*ChunkStorage, error) {
+	cs := &ChunkStorage{dbPath: dbPath}
+	var err error
+
+	cs.db, err = sql.Open("sqlite3", cs.dbPath)
+	if err != nil {
+		logger.Printf("Error opening database '%s': %v", cs.dbPath, err)
+		return nil, fmt.Errorf("error opening database '%s': %w", cs.dbPath, err)
+	}
+
+	// Set PRAGMAs
+	// Using a single transaction for PRAGMAs might not be necessary or ideal,
+	// direct execution is common.
+	_, err = cs.db.Exec("PRAGMA journal_mode=WAL;")
+	if err != nil {
+		cs.db.Close()
+		return nil, fmt.Errorf("error setting journal_mode: %w", err)
+	}
+	_, err = cs.db.Exec("PRAGMA synchronous=NORMAL;")
+	if err != nil {
+		cs.db.Close()
+		return nil, fmt.Errorf("error setting synchronous: %w", err)
+	}
+
+	// Create table if not exists
+	_, err = cs.db.Exec(`
+		CREATE TABLE IF NOT EXISTS chunks (
+			hash TEXT PRIMARY KEY,
+			data BLOB
+		)
+	`)
+	if err != nil {
+		cs.db.Close()
+		return nil, fmt.Errorf("error creating chunks table: %w", err)
+	}
+
+	// Set user_version (optional, for schema migration tracking)
+	_, err = cs.db.Exec("PRAGMA user_version = 1;")
+	if err != nil {
+		cs.db.Close()
+		return nil, fmt.Errorf("error setting user_version: %w", err)
+	}
+
+	logger.Printf("Database initialized at %s", dbPath)
+	return cs, nil
+}
+
+// store_chunks_batch (Python: executemany)
+func (cs *ChunkStorage) StoreChunksBatch(chunksToStore [][2]interface{}) error {
+	if len(chunksToStore) == 0 {
+		return nil
+	}
+
+	tx, err := cs.db.Begin()
+	if err != nil {
+		return fmt.Errorf("error beginning transaction: %w", err)
+	}
+	defer tx.Rollback() // Rollback on error unless committed
+
+	stmt, err := tx.Prepare("INSERT OR REPLACE INTO chunks (hash, data) VALUES (?, ?)")
+	if err != nil {
+		return fmt.Errorf("error preparing statement: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, chunk := range chunksToStore {
+		_, err := stmt.Exec(chunk[0], chunk[1])
+		if err != nil {
+			return fmt.Errorf("error executing statement for chunk: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("error committing transaction: %w", err)
+	}
+
+	logger.Printf("Flushed batch of %d chunks to DB.", len(chunksToStore))
+	return nil
+}
+
+// retrieve_chunk (Python: fetchone)
+func (cs *ChunkStorage) RetrieveChunk(saltedChunkHash string) ([]byte, error) {
+	var data []byte
+	err := cs.db.QueryRow("SELECT data FROM chunks WHERE hash = ?", saltedChunkHash).Scan(&data)
+	if err == sql.ErrNoRows {
+		return nil, nil // Chunk not found
+	}
+	if err != nil {
+		logger.Printf("SQLite error retrieving chunk %s: %v", saltedChunkHash, err)
+		return nil, fmt.Errorf("error retrieving chunk %s: %w", saltedChunkHash, err)
+	}
+	return data, nil
+}
+
+// close (Python: conn.close())
+func (cs *ChunkStorage) Close() {
+	if cs.db != nil {
+		cs.db.Close()
+		logger.Println("Database connection closed.")
+	}
+}
+
+// KeyMapEntry represents the data for a single file in the key map
+type KeyMapEntry struct {
+	FileSalt      []byte `json:"file_salt"`
+	USFHash       string `json:"usf_hash"`
+	MAC           string `json:"mac"`
+	OriginalHeader []byte `json:"original_header"`
+	Key           []string `json:"key"` // Slice of salted chunk hashes
+}
+
+// SerializableKeyMapEntry for JSON (base64 encode byte slices)
+type SerializableKeyMapEntry struct {
+	FileSalt      string `json:"file_salt"`
+	USFHash       string `json:"usf_hash"`
+	MAC           string `json:"mac"`
+	OriginalHeader string `json:"original_header"`
+	Key           []string `json:"key"`
+}
+
+// KeyMap is the main structure for the key data, including format version
+type KeyMap struct {
+	FormatVersion int                      `json:"format_version"`
+	Files         map[string]KeyMapEntry   `json:"files"` // Using a map for filenames
+}
+
+
+// disguise_key function
+func disguiseKey(keyData KeyMap, outDir string, style string) error {
+	if err := ensureDirs(outDir); err != nil {
+		return err
+	}
+
+	outputPath := filepath.Join(outDir, fmt.Sprintf("veriduct_key.%s", style))
+
+	// Convert to serializable format
+	serializableKeyData := make(map[string]SerializableKeyMapEntry)
+	for fname, data := range keyData.Files {
+		serializableKeyData[fname] = SerializableKeyMapEntry{
+			FileSalt:       base64.StdEncoding.EncodeToString(data.FileSalt),
+			USFHash:        data.USFHash,
+			MAC:            data.MAC,
+			OriginalHeader: base64.StdEncoding.EncodeToString(data.OriginalHeader),
+			Key:            data.Key,
+		}
+	}
+
+	var file *os.File
+	var err error
+	if style == "csv" {
+		file, err = os.Create(outputPath)
+		if err != nil {
+			logger.Printf("Error creating CSV key file '%s': %v", outputPath, err)
+			return fmt.Errorf("error creating CSV key file: %w", err)
+		}
+		defer file.Close()
+
+		_, err = file.WriteString(fmt.Sprintf("# Veriduct Keymap Format Version: %d\n", keyData.FormatVersion))
+		if err != nil { return err }
+		_, err = file.WriteString("filename,file_salt,usf_hash,mac,original_header,chunk_id,chunk_hash\n")
+		if err != nil { return err }
+
+		for fname, data := range serializableKeyData {
+			for i, ch := range data.Key {
+				if i == 0 {
+					_, err = file.WriteString(fmt.Sprintf("%s,%s,%s,%s,%s,%d,%s\n",
+						fname, data.FileSalt, data.USFHash, data.MAC, data.OriginalHeader, i, ch))
+				} else {
+					_, err = file.WriteString(fmt.Sprintf("%s,,,,,%d,%s\n", fname, i, ch))
+				}
+				if err != nil { return err }
+			}
+		}
+	} else if style == "log" {
+		file, err = os.Create(outputPath)
+		if err != nil {
+			logger.Printf("Error creating LOG key file '%s': %v", outputPath, err)
+			return fmt.Errorf("error creating LOG key file: %w", err)
+		}
+		defer file.Close()
+
+		_, err = file.WriteString(fmt.Sprintf("[%s] [INFO] Veriduct Keymap Format Version: %d\n", time.Now().Format(time.RFC3339), keyData.FormatVersion))
+		if err != nil { return err }
+
+		for fname, data := range serializableKeyData {
+			_, err = file.WriteString(fmt.Sprintf("[%s] [INFO] FileMetadata: File=%s Salt=%s USFHash=%s MAC=%s OriginalHeader=%s\n",
+				time.Now().Format(time.RFC3339), fname, data.FileSalt, data.USFHash, data.MAC, data.OriginalHeader))
+			if err != nil { return err }
+
+			for i, ch := range data.Key {
+				ts := time.Now().Format(time.RFC3339)
+				fakeLevels := []string{"INFO", "DEBUG", "WARN"}
+				fakeLevel := fakeLevels[rand.Intn(len(fakeLevels))] // Use math/rand here for simplicity, not crypto/rand
+				_, err = file.WriteString(fmt.Sprintf("%s [%s] FileRef=%s ChunkId=%d ChunkHash=%s\n", ts, fakeLevel, fname, i, ch))
+				if err != nil { return err }
+			}
+		}
+	} else if style == "conf" {
+		file, err = os.Create(outputPath)
+		if err != nil {
+			logger.Printf("Error creating CONF key file '%s': %v", outputPath, err)
+			return fmt.Errorf("error creating CONF key file: %w", err)
+		}
+		defer file.Close()
+
+		_, err = file.WriteString(fmt.Sprintf("# Veriduct Keymap Format Version: %d\n\n", keyData.FormatVersion))
+		if err != nil { return err }
+
+		for fname, data := range serializableKeyData {
+			_, err = file.WriteString(fmt.Sprintf("[%s]\n", fname))
+			if err != nil { return err }
+			_, err = file.WriteString(fmt.Sprintf("file_salt = %s\n", data.FileSalt))
+			if err != nil { return err }
+			_, err = file.WriteString(fmt.Sprintf("usf_hash = %s\n", data.USFHash))
+			if err != nil { return err }
+			if data.MAC != "" {
+				_, err = file.WriteString(fmt.Sprintf("mac = %s\n", data.MAC))
+				if err != nil { return err }
+			}
+			if data.OriginalHeader != "" {
+				_, err = file.WriteString(fmt.Sprintf("original_header = %s\n", data.OriginalHeader))
+				if err != nil { return err }
+			}
+			for i, ch := range data.Key {
+				_, err = file.WriteString(fmt.Sprintf("chunk%d = %s\n", i, ch))
+				if err != nil { return err }
+			}
+			_, err = file.WriteString("\n")
+			if err != nil { return err }
+		}
+	} else {
+		return fmt.Errorf("unknown disguise style: %s", style)
+	}
+
+	logger.Printf("Disguised key written to: %s", outputPath)
+	return nil
+}
+
+// decode_disguised_key function
+func decodeDisguisedKey(keyPath string, style string) (KeyMap, error) {
+	keyMap := KeyMap{Files: make(map[string]KeyMapEntry)}
+	
+	content, err := os.ReadFile(keyPath)
+	if err != nil {
+		logger.Printf("Error reading key file '%s': %v", keyPath, err)
+		return keyMap, fmt.Errorf("error reading key file: %w", err)
+	}
+	lines := strings.Split(string(content), "\n")
+
+	// Parse format version first
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "# Veriduct Keymap Format Version:") || strings.Contains(line, "[INFO] Veriduct Keymap Format Version:") {
+			parts := strings.Split(line, ":")
+			if len(parts) == 2 {
+				versionStr := strings.TrimSpace(parts[1])
+				_, err := fmt.Sscanf(versionStr, "%d", &keyMap.FormatVersion)
+				if err != nil {
+					logger.Printf("Warning: Could not parse keymap format version from line: %s", line)
+				}
+				break
+			}
+		}
+	}
+
+	fileBuffer := make(map[string]struct {
+		FileSaltB64        string
+		USFHash            string
+		MAC                string
+		OriginalHeaderB64  string
+		ChunkHashesWithIDs []struct {
+			ID   int
+			Hash string
+		}
+	})
+
+	if style == "csv" {
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "#") || line == "" {
+				continue
+			}
+			parts := strings.Split(line, ",")
+			if len(parts) != 7 {
+				logger.Printf("Debug: Skipping malformed CSV line: %s", line)
+				continue
+			}
+			fname, fileSaltB64, usfHash, mac, originalHeaderB64, chunkIDStr, chunkHash := parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6]
+
+			if _, exists := fileBuffer[fname]; !exists {
+				fileBuffer[fname] = struct {
+					FileSaltB64        string
+					USFHash            string
+					MAC                string
+					OriginalHeaderB64  string
+					ChunkHashesWithIDs []struct {
+						ID   int
+						Hash string
+					}
+				}{
+					FileSaltB64:        fileSaltB64,
+					USFHash:            usfHash,
+					MAC:                mac,
+					OriginalHeaderB64:  originalHeaderB64,
+					ChunkHashesWithIDs: []struct { ID int; Hash string }{},
+				}
+			} else {
+				entry := fileBuffer[fname]
+				if entry.FileSaltB64 == "" { entry.FileSaltB64 = fileSaltB64 }
+				if entry.USFHash == "" { entry.USFHash = usfHash }
+				if entry.MAC == "" { entry.MAC = mac }
+				if entry.OriginalHeaderB64 == "" { entry.OriginalHeaderB64 = originalHeaderB64 }
+				fileBuffer[fname] = entry // Update the map
+			}
+
+			chunkID, err := strconv.Atoi(chunkIDStr)
+			if err != nil {
+				logger.Printf("Debug: Skipping CSV line with invalid chunk_id: %s", line)
+				continue
+			}
+			if chunkHash != "" {
+				entry := fileBuffer[fname]
+				entry.ChunkHashesWithIDs = append(entry.ChunkHashesWithIDs, struct { ID int; Hash string }{chunkID, chunkHash})
+				fileBuffer[fname] = entry // Update the map
+			}
+		}
+	} else if style == "log" {
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if strings.Contains(line, "FileMetadata: File=") && strings.Contains(line, "Salt=") && strings.Contains(line, "USFHash=") {
+				// Parse FileMetadata line
+				// This parsing is more complex and would benefit from a regex or more robust string splitting
+				// For brevity, let's assume a simplified parsing.
+				fname := extractLogPart(line, "File=")
+				fileSaltB64 := extractLogPart(line, "Salt=")
+				usfHash := extractLogPart(line, "USFHash=")
+				mac := extractLogPart(line, "MAC=")
+				originalHeaderB64 := extractLogPart(line, "OriginalHeader=")
+
+				if fname != "" {
+					fileBuffer[fname] = struct {
+						FileSaltB64        string
+						USFHash            string
+						MAC                string
+						OriginalHeaderB64  string
+						ChunkHashesWithIDs []struct {
+							ID   int
+							Hash string
+						}
+					}{
+						FileSaltB64:       nullToEmpty(fileSaltB64),
+						USFHash:           nullToEmpty(usfHash),
+						MAC:               nullToEmpty(mac),
+						OriginalHeaderB64: nullToEmpty(originalHeaderB64),
+						ChunkHashesWithIDs: []struct { ID int; Hash string }{},
+					}
+				} else {
+					logger.Printf("Debug: Skipping incomplete LOG metadata line: %s", line)
+				}
+			} else if strings.Contains(line, "FileRef=") && strings.Contains(line, "ChunkId=") && strings.Contains(line, "ChunkHash=") {
+				// Parse Chunk line
+				fname := extractLogPart(line, "FileRef=")
+				chunkIDStr := extractLogPart(line, "ChunkId=")
+				chunkHash := extractLogPart(line, "ChunkHash=")
+
+				chunkID, err := strconv.Atoi(chunkIDStr)
+				if err != nil {
+					logger.Printf("Debug: Skipping LOG line with invalid ChunkId: %s", line)
+					continue
+				}
+				if fname != "" && chunkHash != "" {
+					entry := fileBuffer[fname] // Will create zero value if not exists, then update
+					entry.ChunkHashesWithIDs = append(entry.ChunkHashesWithIDs, struct { ID int; Hash string }{chunkID, chunkHash})
+					fileBuffer[fname] = entry
+				} else {
+					logger.Printf("Debug: Skipping incomplete LOG chunk line: %s", line)
+				}
+			}
+		}
+	} else if style == "conf" {
+		currentFile := ""
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+				currentFile = strings.TrimSuffix(strings.TrimPrefix(line, "["), "]")
+				fileBuffer[currentFile] = struct {
+					FileSaltB64        string
+					USFHash            string
+					MAC                string
+					OriginalHeaderB64  string
+					ChunkHashesWithIDs []struct {
+						ID   int
+						Hash string
+					}
+				}{ChunkHashesWithIDs: []struct { ID int; Hash string }{}} // Initialize empty slice
+			} else if currentFile != "" && strings.Contains(line, "=") {
+				parts := strings.SplitN(line, "=", 2)
+				key := strings.TrimSpace(parts[0])
+				value := strings.TrimSpace(parts[1])
+
+				entry := fileBuffer[currentFile]
+				if key == "file_salt" {
+					entry.FileSaltB64 = value
+				} else if key == "usf_hash" {
+					entry.USFHash = value
+				} else if key == "mac" {
+					entry.MAC = value
+				} else if key == "original_header" {
+					entry.OriginalHeaderB64 = value
+				} else if strings.HasPrefix(key, "chunk") {
+					chunkIDStr := strings.TrimPrefix(key, "chunk")
+					chunkID, err := strconv.Atoi(chunkIDStr)
+					if err != nil {
+						logger.Printf("Debug: Skipping CONF line with invalid chunk key: %s", line)
+						continue
+					}
+					if value != "" {
+						entry.ChunkHashesWithIDs = append(entry.ChunkHashesWithIDs, struct { ID int; Hash string }{chunkID, value})
+					}
+				} else {
+					logger.Printf("Debug: Skipping unknown CONF key: %s", line)
+				}
+				fileBuffer[currentFile] = entry // Update the map
+			}
+		}
+	} else {
+		return keyMap, fmt.Errorf("unknown disguise style: %s", style)
+	}
+
+	// Process buffered data into the final KeyMap structure
+	for fname, data := range fileBuffer {
+		fileSalt, err := base64.StdEncoding.DecodeString(data.FileSaltB64)
+		if err != nil {
+			logger.Printf("Error: Failed to decode salt for file '%s': %v", fname, err)
+			continue // Skip this file
+		}
+
+		if fileSalt == nil || len(fileSalt) == 0 {
+			logger.Printf("Error: Missing file salt for '%s'. Cannot reassemble chunks.", fname)
+			continue
+		}
+
+		originalHeaderBytes, err := base64.StdEncoding.DecodeString(data.OriginalHeaderB64)
+		if err != nil {
+			logger.Printf("Warning: Failed to decode original header for file '%s': %v", fname, err)
+			originalHeaderBytes = nil // Set to nil if decoding fails
+		}
+
+		// Sort chunk hashes by ID
+		sort.Slice(data.ChunkHashesWithIDs, func(i, j int) bool {
+			return data.ChunkHashesWithIDs[i].ID < data.ChunkHashesWithIDs[j].ID
+		})
+
+		var sortedChunkHashes []string
+		for _, ch := range data.ChunkHashesWithIDs {
+			sortedChunkHashes = append(sortedChunkHashes, ch.Hash)
+		}
+
+		if len(sortedChunkHashes) == 0 {
+			logger.Printf("Warning: File '%s' has no chunk hashes in keymap. Skipping.", fname)
+			continue
+		}
+
+		keyMap.Files[fname] = KeyMapEntry{
+			FileSalt:      fileSalt,
+			USFHash:       data.USFHash,
+			MAC:           data.MAC,
+			OriginalHeader: originalHeaderBytes,
+			Key:           sortedChunkHashes,
+		}
+	}
+
+	loadedVersion := keyMap.FormatVersion
+	if loadedVersion == 0 { // Not found or parsed as 0
+		logger.Println("Warning: Keymap format version not found in key file. Assuming latest version for parsing.")
+	} else if loadedVersion != KEYMAP_FORMAT_VERSION {
+		return keyMap, fmt.Errorf("keymap format version mismatch. Expected %d, found %d. This key file might be incompatible with this version of Veriduct.", KEYMAP_FORMAT_VERSION, loadedVersion)
+	}
+
+	if len(keyMap.Files) == 0 {
+		return keyMap, fmt.Errorf("no valid file entries found in key file after decoding.")
+	}
+
+	return keyMap, nil
+}
+
+// Helper for log parsing (basic, could be improved with regex)
+func extractLogPart(line, prefix string) string {
+	idx := strings.Index(line, prefix)
+	if idx == -1 {
+		return ""
+	}
+	start := idx + len(prefix)
+	end := strings.IndexAny(line[start:], " ") // Find next space
+	if end == -1 {
+		return line[start:] // Until end of line
+	}
+	return line[start : start+end]
+}
+
+// Helper to convert "N/A" to empty string for optional fields
+func nullToEmpty(s string) string {
+	if s == "N/A" {
+		return ""
+	}
+	return s
+}
+
+// AnnihilatePath function (Start of the main logic)
+func annihilatePath(inputPath, outDir string, wipeBytes int, addHMAC bool, disguiseStyle string, forceInternal bool, verbose bool) int {
+	// Set logger level based on verbose flag
+	if verbose {
+		logger.SetFlags(logger.Flags() | log.Ldate | log.Ltime | log.Lshortfile) // Add file/line info
+	} else {
+		logger.SetFlags(log.LstdFlags)
+	}
+
+	inputPathAbs, err := filepath.Abs(inputPath)
+	if err != nil {
+		logger.Printf("Error getting absolute path for input: %v", err)
+		return 1
+	}
+	outDirAbs, err := filepath.Abs(outDir)
+	if err != nil {
+		logger.Printf("Error getting absolute path for output: %v", err)
+		return 1
+	}
+
+	outDirRealNorm, err := filepath.EvalSymlinks(outDirAbs)
+	if err != nil && !os.IsNotExist(err) { // EvalSymlinks will error if path doesn't exist, which is fine before creation
+		logger.Printf("Error resolving output directory symlinks: %v", err)
+		return 1
+	}
+	if os.IsNotExist(err) { // If it doesn't exist, use the absolute path for comparison
+		outDirRealNorm = outDirAbs
+	}
+	outDirRealNorm = strings.ToLower(filepath.ToSlash(outDirRealNorm)) // Normalize for case-insensitive comparison
+
+	inputPathRealNorm, err := filepath.EvalSymlinks(inputPathAbs)
+	if err != nil && !os.IsNotExist(err) {
+		logger.Printf("Error resolving input path symlinks: %v", err)
+		return 1
+	}
+	if os.IsNotExist(err) {
+		inputPathRealNorm = inputPathAbs
+	}
+	inputPathRealNorm = strings.ToLower(filepath.ToSlash(inputPathRealNorm))
+
+	// Check if output directory is inside input path
+	if strings.HasPrefix(outDirRealNorm, inputPathRealNorm) && outDirRealNorm != inputPathRealNorm {
+		if !forceInternal {
+			logger.Printf("Error: Output directory '%s' (resolved to '%s') is inside the input path '%s' (resolved to '%s'). This will cause the annihilator to process its own output. Use --force-internal to allow this (output directory will be skipped).", outDirAbs, outDirRealNorm, inputPathAbs, inputPathRealNorm)
+			return 1
+		} else {
+			logger.Printf("Warning: Output directory '%s' (resolved to '%s') is inside the input path '%s' (resolved to '%s'). Using --force-internal flag, skipping the output directory during traversal.", outDirAbs, outDirRealNorm, inputPathAbs, inputPathRealNorm)
+		}
+	}
+
+	if err := ensureDirs(outDirAbs); err != nil {
+		return 1
+	}
+
+	keyMap := KeyMap{
+		FormatVersion: KEYMAP_FORMAT_VERSION,
+		Files:         make(map[string]KeyMapEntry),
+	}
+	dbPath := filepath.Join(outDirAbs, DB_FILE)
+
+	chunkStorage, err := NewChunkStorage(dbPath)
+	if err != nil {
+		return 1
+	}
+	defer chunkStorage.Close()
+
+	var filesToProcess []string
+	inputInfo, err := os.Stat(inputPathAbs)
+	if err != nil {
+		logger.Printf("Error stating input path '%s': %v", inputPathAbs, err)
+		return 1
+	}
+
+	isSingleFileInput := inputInfo.Mode().IsRegular()
+
+	inputBasePath := inputPathAbs
+	if isSingleFileInput {
+		filesToProcess = append(filesToProcess, inputPathAbs)
+		inputBasePath = filepath.Dir(inputPathAbs)
+	} else if inputInfo.Mode().IsDir() {
+		err = filepath.Walk(inputPathAbs, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				logger.Printf("Error walking path '%s': %v", path, err)
+				return nil // Don't stop traversal for individual errors
+			}
+
+			if info.IsDir() {
+				// Check if this directory is the output directory itself
+				dirRealNorm, _ := filepath.EvalSymlinks(path)
+				if os.IsNotExist(err) {
+					dirRealNorm = path
+				}
+				dirRealNorm = strings.ToLower(filepath.ToSlash(dirRealNorm))
+
+				if strings.HasPrefix(dirRealNorm, outDirRealNorm) && dirRealNorm == outDirRealNorm {
+					return filepath.SkipDir // Skip the output directory if it's found
+				}
+				return nil
+			}
+
+			if info.Mode().IsRegular() {
+				// Check if the file is inside the output directory
+				fileRealNorm, _ := filepath.EvalSymlinks(path)
+				if os.IsNotExist(err) {
+					fileRealNorm = path
+				}
+				fileRealNorm = strings.ToLower(filepath.ToSlash(fileRealNorm))
+
+				if strings.HasPrefix(fileRealNorm, outDirRealNorm) {
+					logger.Printf("Debug: Skipping file in output directory: %s", path)
+					return nil
+				}
+				filesToProcess = append(filesToProcess, path)
+			}
+			return nil
+		})
+		if err != nil {
+			logger.Printf("Error during file system walk: %v", err)
+			return 1
+		}
+	} else {
+		logger.Printf("Error: Input path is neither a file nor a directory: %s", inputPath)
+		return 1
+	}
+
+	totalFiles := len(filesToProcess)
+	if totalFiles == 0 {
+		logger.Printf("Warning: No files found to process in '%s'.", inputPath)
+		return 0
+	}
+
+	processedCount := 0
+	for i, fpathAbs := range filesToProcess {
+		relPath, err := filepath.Rel(inputBasePath, fpathAbs)
+		if err != nil {
+			logger.Printf("Error getting relative path for '%s': %v", fpathAbs, err)
+			continue
+		}
+
+		fileSalt := make([]byte, FILE_SALT_SIZE)
+		if _, err := rand.Read(fileSalt); err != nil {
+			logger.Printf("Error generating file salt for '%s': %v", relPath, err)
+			continue
+		}
+
+		var keySequence []string
+		var chunksToStoreBatch [][2]interface{}
+		usfDataHasher := sha256.New()
+		originalFileHeaderBytes := make([]byte, 0, wipeBytes) // Pre-allocate capacity
+
+		logger.Printf("Annihilating file (%d/%d): %s", i+1, totalFiles, relPath)
+
+		file, err := os.OpenFile(fpathAbs, os.O_RDWR, 0644) // Open for reading and writing
+		if err != nil {
+			logger.Printf("Error opening file '%s': %v", relPath, err)
+			continue
+		}
+
+		// Capture original header first
+		if wipeBytes > 0 {
+			headerBuf := make([]byte, wipeBytes)
+			n, err := file.Read(headerBuf)
+			if err != nil && err != io.EOF {
+				logger.Printf("Error reading original header for '%s': %v", relPath, err)
+				file.Close()
+				continue
+			}
+			originalFileHeaderBytes = headerBuf[:n]
+			// Seek back to the beginning of the file
+			_, err = file.Seek(0, io.SeekStart)
+			if err != nil {
+				logger.Printf("Error seeking to start of file '%s': %v", relPath, err)
+				file.Close()
+				continue
+			}
+		}
+
+
+		bytesProcessed := 0
+		chunkIndex := 0
+
+		for {
+			data := make([]byte, CHUNK_SIZE)
+			n, err := file.Read(data)
+			if err != nil && err != io.EOF {
+				logger.Printf("Error reading chunk from '%s': %v", relPath, err)
+				break // Exit loop on error
+			}
+			if n == 0 {
+				break // End of file
+			}
+
+			currentDataBlock := data[:n]
+
+			// Apply wiping to the beginning of the file
+			wipeAmountInBlock := 0
+			if bytesProcessed < wipeBytes {
+				remainingWipe := wipeBytes - bytesProcessed
+				wipeAmountInBlock = min(n, remainingWipe)
+				if wipeAmountInBlock > 0 {
+					// Generate random bytes for wiping
+					randomBytes := make([]byte, wipeAmountInBlock)
+					if _, err := rand.Read(randomBytes); err != nil {
+						logger.Printf("Error generating random bytes for wiping '%s': %v", relPath, err)
+						break
+					}
+					copy(currentDataBlock[:wipeAmountInBlock], randomBytes)
+				}
+			}
+
+			chunkData := currentDataBlock // This is the potentially wiped chunk
+
+			chash := calculateSaltedChunkHash(fileSalt, chunkData)
+
+			chunksToStoreBatch = append(chunksToStoreBatch, [2]interface{}{chash, chunkData})
+			keySequence = append(keySequence, chash)
+			usfDataHasher.Write(chunkData) // Update USF hash with the (potentially wiped) chunk
+
+			if verbose {
+				logger.Printf("  Processed chunk %d for '%s' (salted hash %s...)", chunkIndex, relPath, chash[:8])
+			}
+			chunkIndex++
+			bytesProcessed += n
+
+			if len(chunksToStoreBatch) >= BATCH_FLUSH_THRESHOLD {
+				if err := chunkStorage.StoreChunksBatch(chunksToStoreBatch); err != nil {
+					logger.Printf("Error flushing batch for file '%s': %v", relPath, err)
+					file.Close()
+					return 1 // Critical error, abort
+				}
+				chunksToStoreBatch = nil // Clear the batch
+			}
+		}
+
+		if err := file.Close(); err != nil {
+			logger.Printf("Error closing file '%s': %v", relPath, err)
+		}
+
+		if len(chunksToStoreBatch) > 0 {
+			if err := chunkStorage.StoreChunksBatch(chunksToStoreBatch); err != nil {
+				logger.Printf("Error flushing final batch for file '%s': %v", relPath, err)
+				return 1 // Critical error, abort
+			}
+		}
+
+		usfStreamHash := fmt.Sprintf("%x", usfDataHasher.Sum(nil))
+		macTag := ""
+		if addHMAC {
+			macTag = calculateHMAC(fileSalt, []byte(usfStreamHash))
+			logger.Printf("  Calculated HMAC for '%s': %s...", relPath, macTag[:8])
+		}
+
+		keyMap.Files[relPath] = KeyMapEntry{
+			FileSalt:      fileSalt,
+			USFHash:       usfStreamHash,
+			MAC:           macTag,
+			OriginalHeader: originalFileHeaderBytes,
+			Key:           keySequence,
+		}
+		processedCount++
+	}
+
+	// Final key output
+	var errKeyOutput error
+	if disguiseStyle != "" {
+		errKeyOutput = disguiseKey(keyMap, outDirAbs, disguiseStyle)
+	} else {
+		keyPath := filepath.Join(outDirAbs, KEY_FILE)
+		cctx, err := zstd.NewWriter(nil) // nil means default compression level
+		if err != nil {
+			logger.Printf("Error creating zstd writer: %v", err)
+			errKeyOutput = err
+		} else {
+			jsonData, err := json.Marshal(keyMap)
+			if err != nil {
+				logger.Printf("Error marshaling key map to JSON: %v", err)
+				errKeyOutput = err
+			} else {
+				compressed := cctx.EncodeAll(jsonData, nil) // nil is a pre-allocated buffer, can be nil
+				if compressed == nil {
+					logger.Printf("Error compressing key map data.")
+					errKeyOutput = fmt.Errorf("zstd compression failed")
+				} else {
+					err = os.WriteFile(keyPath, compressed, 0644)
+					if err != nil {
+						logger.Printf("Error writing compressed key file '%s': %v", keyPath, err)
+						errKeyOutput = err
+					} else {
+						logger.Printf("Annihilation complete (%d files processed successfully). Key written to '%s' using database: '%s'", processedCount, keyPath, dbPath)
+					}
+				}
+			}
+		}
+	}
+
+	if errKeyOutput != nil {
+		logger.Printf("Error during key output: %v", errKeyOutput)
+		return 1
+	}
+
+	if processedCount < totalFiles {
+		logger.Printf("Warning: Annihilation completed with errors or skipped files: %d/%d files processed successfully.", processedCount, totalFiles)
+		return 1
+	} else {
+		return 0
+	}
+}
+
+
+// reassemblePath function
+func reassemblePath(keyPath, outDir string, disguiseStyle string, ignoreIntegrity bool, verbose bool) int {
+	if verbose {
+		logger.SetFlags(logger.Flags() | log.Ldate | log.Ltime | log.Lshortfile)
+	} else {
+		logger.SetFlags(log.LstdFlags)
+	}
+
+	keyPathAbs, err := filepath.Abs(keyPath)
+	if err != nil {
+		logger.Printf("Error getting absolute path for key file: %v", err)
+		return 1
+	}
+	outDirAbs, err := filepath.Abs(outDir)
+	if err != nil {
+		logger.Printf("Error getting absolute path for output directory: %v", err)
+		return 1
+	}
+
+	if err := ensureDirs(outDirAbs); err != nil {
+		return 1
+	}
+
+	keyDir := filepath.Dir(keyPathAbs)
+	dbPath := filepath.Join(keyDir, DB_FILE)
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		logger.Printf("Error: Database file not found next to key file: %s", dbPath)
+		return 1
+	}
+	logger.Printf("Using database file: %s", dbPath)
+
+	var decodedKeyMap KeyMap
+	if disguiseStyle != "" {
+		decodedKeyMap, err = decodeDisguisedKey(keyPathAbs, disguiseStyle)
+	} else {
+		f, err := os.Open(keyPathAbs)
+		if err != nil {
+			logger.Printf("Error opening key file '%s': %v", keyPathAbs, err)
+			return 1
+		}
+		defer f.Close()
+
+		dctx, err := zstd.NewReader(f)
+		if err != nil {
+			logger.Printf("Error creating zstd reader: %v", err)
+			return 1
+		}
+		defer dctx.Close()
+
+		data, err := io.ReadAll(dctx)
+		if err != nil {
+			logger.Printf("Decompression failed: %v", err)
+			return 1
+		}
+
+		err = json.Unmarshal(data, &decodedKeyMap)
+		if err != nil {
+			logger.Printf("Error unmarshaling key map from JSON: %v", err)
+			return 1
+		}
+
+		loadedVersion := decodedKeyMap.FormatVersion
+		if loadedVersion == 0 {
+			logger.Println("Warning: Keymap format version not found in standard key file. Assuming latest version for parsing.")
+		} else if loadedVersion != KEYMAP_FORMAT_VERSION {
+			logger.Printf("Error: Keymap format version mismatch. Expected %d, found %d. This key file might be incompatible with this version of Veriduct.", KEYMAP_FORMAT_VERSION, loadedVersion)
+			return 1
+		}
+
+		// Convert SerializableKeyMapEntry to KeyMapEntry for internal use
+		// This part is implicitly handled by `json.Unmarshal` if your `KeyMap` struct directly supports byte slices and the `json` tags are correct.
+		// However, given the Python's explicit base64 encoding/decoding, it's safer to have a separate serializable struct.
+		// If you use `SerializableKeyMapEntry` for unmarshaling, you'll need to iterate and decode base64 fields manually here.
+		// For simplicity, let's assume `KeyMapEntry` itself has `json:"-"` on byte fields and you handle conversion *before* JSON.
+		// Or, just use `json.Marshal`/`json.Unmarshal` on `SerializableKeyMap` and then convert to `KeyMap` in a separate step.
+		// For this example, I'm assuming `KeyMap` is what's directly unmarshaled and byte fields are correctly handled.
+		// If not, a loop like this would be needed:
+		/*
+		tempMap := make(map[string]SerializableKeyMapEntry)
+		err = json.Unmarshal(data, &tempMap)
+		if err != nil { ... }
+		decodedKeyMap.Files = make(map[string]KeyMapEntry)
+		for fname, sData := range tempMap {
+			fileSalt, _ := base64.StdEncoding.DecodeString(sData.FileSalt)
+			originalHeader, _ := base64.StdEncoding.DecodeString(sData.OriginalHeader)
+			decodedKeyMap.Files[fname] = KeyMapEntry{
+				FileSalt: fileSalt, USFHash: sData.USFHash, MAC: sData.MAC,
+				OriginalHeader: originalHeader, Key: sData.Key,
+			}
+		}
+		*/
+	}
+	if err != nil {
+		logger.Printf("Error decoding key file '%s': %v", keyPath, err)
+		return 1
+	}
+
+	chunkStorage, err := NewChunkStorage(dbPath)
+	if err != nil {
+		return 1
+	}
+	defer chunkStorage.Close()
+
+	reassembledCount := 0
+	failedCount := 0
+	totalFilesInKeymap := len(decodedKeyMap.Files)
+
+	if totalFilesInKeymap == 0 {
+		logger.Println("Error: No valid file entries found in key file after decoding/parsing.")
+		return 1
+	}
+
+	for relPath, data := range decodedKeyMap.Files {
+		fullOutPath := filepath.Join(outDirAbs, relPath)
+		logger.Printf("Reassembling USF file (%d/%d): %s", reassembledCount+failedCount+1, totalFilesInKeymap, relPath)
+
+		expectedUSFHash := data.USFHash
+		fileSalt := data.FileSalt
+		expectedMAC := data.MAC
+		originalHeaderBytes := data.OriginalHeader
+		chunkHashesSequence := data.Key
+
+		if fileSalt == nil || len(fileSalt) == 0 {
+			logger.Printf("Error: Cannot reassemble '%s': File salt is missing.", relPath)
+			failedCount++
+			continue
+		}
+
+		missingChunks := false
+		reconstructionHasher := sha256.New()
+		var outputFile *os.File
+		integrityCheckPassed := true
+
+		// Ensure output directory for the file exists
+		if err := ensureDirs(filepath.Dir(fullOutPath)); err != nil {
+			logger.Printf("Error creating output directory for '%s': %v", fullOutPath, err)
+			failedCount++
+			continue
+		}
+
+		outputFile, err = os.Create(fullOutPath)
+		if err != nil {
+			logger.Printf("Error creating output file '%s': %v", fullOutPath, err)
+			failedCount++
+			continue
+		}
+		defer func(f *os.File) { // Ensure file is closed even on continue
+			if f != nil {
+				f.Close()
+			}
+		}(outputFile)
+
+
+		for chunkIndex, saltedChash := range chunkHashesSequence {
+			chunkData, err := chunkStorage.RetrieveChunk(saltedChash)
+			if err != nil {
+				logger.Printf("Error retrieving chunk %s for file '%s': %v", saltedChash, relPath, err)
+				missingChunks = true
+				integrityCheckPassed = false
+				break
+			}
+			if chunkData == nil {
+				logger.Printf("Error: Missing chunk: %s for file '%s'. File reassembly incomplete.", saltedChash, relPath)
+				missingChunks = true
+				integrityCheckPassed = false
+				break
+			}
+
+			reconstructionHasher.Write(chunkData)
+			if _, err := outputFile.Write(chunkData); err != nil {
+				logger.Printf("Error writing chunk data to file '%s': %v", relPath, err)
+				integrityCheckPassed = false
+				break
+			}
+
+			if verbose {
+				logger.Printf("  Retrieved and wrote chunk %d for '%s' (salted hash %s...)", chunkIndex, relPath, saltedChash[:8])
+			}
+		}
+
+		if outputFile != nil {
+			outputFile.Close() // Close the file before hash verification
+		}
+
+
+		if !missingChunks {
+			rebuiltUSFHash := fmt.Sprintf("%x", reconstructionHasher.Sum(nil))
+
+			if expectedUSFHash == "" {
+				logger.Printf("Warning: Expected USF hash missing in key map for '%s'. Cannot verify integrity of reassembled USF data.", relPath)
+				if !ignoreIntegrity {
+					logger.Printf("Error: Integrity verification skipped for '%s' due to missing hash. Treating as failure.", relPath)
+					integrityCheckPassed = false
+				} else {
+					integrityCheckPassed = true
+				}
+			} else if rebuiltUSFHash == expectedUSFHash {
+				logger.Printf("USF hash verification successful for reassembled file: %s", relPath)
+				if expectedMAC != "" {
+					calculatedMAC := calculateHMAC(fileSalt, []byte(rebuiltUSFHash))
+					if hmac.Equal([]byte(calculatedMAC), []byte(expectedMAC)) { // Use hmac.Equal for constant-time comparison
+						logger.Printf("HMAC verification successful for reassembled file: %s", relPath)
+						integrityCheckPassed = true
+					} else {
+						logger.Printf("Error: HMAC mismatch for reassembled file '%s'. Data or keymap may be tampered.", relPath)
+						integrityCheckPassed = false
+					}
+				} else {
+					integrityCheckPassed = true
+				}
+			} else {
+				logger.Printf("Error: USF hash mismatch in reassembled file '%s': expected %s, got %s. File may be corrupted.", relPath, expectedUSFHash, rebuiltUSFHash)
+				integrityCheckPassed = false
+			}
+		}
+
+		if !integrityCheckPassed {
+			failedCount++
+			logger.Printf("Error: File reassembly failed integrity check for '%s'.", relPath)
+			if !ignoreIntegrity {
+				logger.Printf("Error: Deleting potentially corrupted reassembled file: %s", fullOutPath)
+				if err := os.Remove(fullOutPath); err != nil && !os.IsNotExist(err) {
+					logger.Printf("Error removing potentially corrupted file '%s': %v", fullOutPath, err)
+				} else {
+					logger.Printf("Debug: Removed potentially corrupted file: %s", fullOutPath)
+				}
+			} else {
+				logger.Printf("Warning: Ignoring integrity failure for '%s' (--ignore-integrity). Output file %s may be corrupted.", relPath, fullOutPath)
+			}
+			continue
+		}
+
+		// Restore original header
+		if originalHeaderBytes != nil && len(originalHeaderBytes) > 0 {
+			outfPatch, err := os.OpenFile(fullOutPath, os.O_WRONLY, 0644)
+			if err != nil {
+				logger.Printf("Error opening file for header restoration '%s': %v. File may be present but still semantically annihilated.", relPath, err)
+				// This is a warning, not a failure that should prevent reassembledCount++
+			} else {
+				_, err = outfPatch.Write(originalHeaderBytes)
+				outfPatch.Close() // Close the file immediately after writing
+				if err != nil {
+					logger.Printf("Error restoring original header for '%s': %v. File may be present but still semantically annihilated.", relPath, err)
+				} else {
+					logger.Printf("Original header restored for file: %s", relPath)
+				}
+			}
+		} else {
+			logger.Printf("Debug: No original header found in keymap for '%s', skipping restoration.", relPath)
+		}
+
+		reassembledCount++
+	}
+
+	logger.Printf("Reassembly complete: %d files reassembled successfully, %d files failed integrity checks or had errors.", reassembledCount, failedCount)
+
+	if failedCount > 0 {
+		return 2
+	} else if reassembledCount == 0 && totalFilesInKeymap > 0 {
+		logger.Println("Error: No files were successfully reassembled.")
+		return 1
+	} else {
+		return 0
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func main() {
+	// Command line arguments parsing
+	annihilateCmd := flag.NewFlagSet("annihilate", flag.ExitOnError)
+	annihilateInputPath := annihilateCmd.String("input_path", "", "File or directory to annihilate")
+	annihilateOutDir := annihilateCmd.String("out_dir", "", "Output directory for key and database")
+	annihilateWipeBytes := annihilateCmd.Int("wipe-bytes", DEFAULT_USF_WIPE_SIZE, fmt.Sprintf("Number of bytes to randomize at the start of each file (and store as original header) (default: %d)", DEFAULT_USF_WIPE_SIZE))
+	annihilateAddHMAC := annihilateCmd.Bool("add-hmac", false, "Calculate and store HMAC-SHA256 for each file's USF data using the file salt. Provides tamper detection for reassembly, but NOT confidentiality.")
+	annihilateDisguise := annihilateCmd.String("disguise", "", fmt.Sprintf("Optional disguise format for the key file. Choices: %s", strings.Join(DISGUISE_FORMATS, ", ")))
+	annihilateForceInternal := annihilateCmd.Bool("force-internal", false, "Allow output directory to be inside the input directory (output dir will be skipped)")
+	annihilateVerbose := annihilateCmd.Bool("verbose", false, "Enable verbose logging (e.g., per chunk)")
+
+	reassembleCmd := flag.NewFlagSet("reassemble", flag.ExitOnError)
+	reassembleKeyPath := reassembleCmd.String("key_path", "", "Path to disguised or standard key file")
+	reassembleOutDir := reassembleCmd.String("out_dir", "", "Output directory for reassembled files")
+	reassembleDisguise := reassembleCmd.Cmd.String("disguise", "", fmt.Sprintf("Specify disguise format used for the key file. Choices: %s", strings.Join(DISGUISE_FORMATS, ", ")))
+	reassembleIgnoreIntegrity := reassembleCmd.Bool("ignore-integrity", false, "Attempt to reassemble even if integrity checks (hash/HMAC mismatch, missing chunks) fail. Note: This will likely result in corrupted output files.")
+	reassembleVerbose := reassembleCmd.Bool("verbose", false, "Enable verbose logging (e.g., per chunk)")
+
+	if len(os.Args) < 2 {
+		fmt.Println("Usage: veriduct <command> [arguments]")
+		fmt.Println("Commands:")
+		fmt.Println("  annihilate - Annhilate semantics of a file or directory.")
+		fmt.Println("  reassemble - Reassemble USF files from a key file.")
+		os.Exit(1)
+	}
+
+	command := os.Args[1]
+	switch command {
+	case "annihilate":
+		annihilateCmd.Parse(os.Args[2:])
+		if *annihilateInputPath == "" || *annihilateOutDir == "" {
+			annihilateCmd.PrintDefaults()
+			os.Exit(1)
+		}
+		if *annihilateWipeBytes < 0 {
+			logger.Println("Error: --wipe-bytes must be a non-negative integer.")
+			os.Exit(1)
+		}
+		if *annihilateDisguise != "" && !stringInSlice(*annihilateDisguise, DISGUISE_FORMATS) {
+			logger.Printf("Error: Invalid disguise format '%s'. Must be one of %s.", *annihilateDisguise, strings.Join(DISGUISE_FORMATS, ", "))
+			os.Exit(1)
+		}
+		exitCode := annihilatePath(*annihilateInputPath, *annihilateOutDir, *annihilateWipeBytes, *annihilateAddHMAC, *annihilateDisguise, *annihilateForceInternal, *annihilateVerbose)
+		os.Exit(exitCode)
+
+	case "reassemble":
+		reassembleCmd.Parse(os.Args[2:])
+		if *reassembleKeyPath == "" || *reassembleOutDir == "" {
+			reassembleCmd.PrintDefaults()
+			os.Exit(1)
+		}
+		if *reassembleDisguise != "" && !stringInSlice(*reassembleDisguise, DISGUISE_FORMATS) {
+			logger.Printf("Error: Invalid disguise format '%s'. Must be one of %s.", *reassembleDisguise, strings.Join(DISGUISE_FORMATS, ", "))
+			os.Exit(1)
+		}
+		exitCode := reassemblePath(*reassembleKeyPath, *reassembleOutDir, *reassembleDisguise, *reassembleIgnoreIntegrity, *reassembleVerbose)
+		os.Exit(exitCode)
+
+	default:
+		fmt.Println("Unknown command:", command)
+		fmt.Println("Usage: veriduct <command> [arguments]")
+		os.Exit(1)
+	}
+}
+
+// Helper function to check if a string is in a slice
+func stringInSlice(a string, list []string) bool {
+	for _, b := range list {
+		if b == a {
+			return true
+		}
+	}
+	return false
+}
+
